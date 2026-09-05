@@ -1848,7 +1848,7 @@ def donate(message):
     bot.send_message(
         message.chat.id,
         "⭐ Поддержать Anicards\n\n"
-        "Выбери количество Telegram Stars, которое хочешь отправить:",
+        "Выбери количество звезд, которое хочешь отправить:",
         reply_markup=donation_keyboard()
     )
 
