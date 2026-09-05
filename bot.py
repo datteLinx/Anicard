@@ -24,7 +24,7 @@ ai = OpenAI(
     api_key=HF_TOKEN
 )
 
-MODEL = "openai/gpt-oss-20b:groq"
+MODEL = "Qwen/Qwen2.5-0.5B-Instruct:groq"
 
 SYSTEM_PROMPT = """
 You are AniAI, an anime-inspired female AI created by Слип.
@@ -244,7 +244,7 @@ Just talk naturally as AniAI.
 
 
 histories = {}
-MAX_HISTORY = 20
+MAX_HISTORY = 5
 
 
 app = Flask(__name__)
