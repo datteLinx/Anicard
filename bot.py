@@ -7,7 +7,7 @@ import requests
 from dotenv import load_dotenv
 from flask import Flask
 from supabase import create_client, Client
-from unixgram import Bot, types
+from unixgram import Bot, InlineKeyboardMarkup, InlineKeyboardButton
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -24,8 +24,6 @@ SUB_DAILY_LIMIT = 10
 SUB_PRICE_STARS = 50
 EXTRA_PRICE_STARS = 10
 SUB_DURATION_DAYS = 30
-STARS_CURRENCY = "XTR"
-STARS_PROVIDER_TOKEN = ""
 SEARCH_LENGTHS = (4, 5, 6, 7)
 TARGET_FOUND = 5
 MAX_ATTEMPTS = 80
@@ -293,58 +291,54 @@ def get_admin_stats() -> dict:
     }
 
 
-def main_menu(chat_id: int) -> types.InlineKeyboardMarkup:
-    kb = types.InlineKeyboardMarkup(row_width=1)
+def main_menu(chat_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardMarkup(row_width=1)
     kb.add(
-        types.InlineKeyboardButton("🔎 Найти ники", callback_data="menu:search"),
-        types.InlineKeyboardButton(
+        InlineKeyboardButton("🔎 Найти ники", callback_data="menu:search"),
+        InlineKeyboardButton(
             "💎 Подписка / ⭐ Купить запрос", callback_data="menu:buy"
         ),
-        types.InlineKeyboardButton("📊 Моя статистика", callback_data="menu:stats"),
-        types.InlineKeyboardButton("ℹ️ Как это работает", callback_data="menu:help"),
+        InlineKeyboardButton("📊 Моя статистика", callback_data="menu:stats"),
+        InlineKeyboardButton("ℹ️ Как это работает", callback_data="menu:help"),
     )
     if chat_id == ADMIN_ID:
-        kb.add(types.InlineKeyboardButton("🛠 Админ-панель", callback_data="menu:admin"))
+        kb.add(InlineKeyboardButton("🛠 Админ-панель", callback_data="menu:admin"))
     return kb
 
 
-def back_to_menu() -> types.InlineKeyboardMarkup:
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("⬅️ Главное меню", callback_data="menu:main"))
+def back_to_menu() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("⬅️ Главное меню", callback_data="menu:main"))
     return kb
 
 
-def length_menu() -> types.InlineKeyboardMarkup:
-    kb = types.InlineKeyboardMarkup(row_width=len(SEARCH_LENGTHS))
+def length_menu() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardMarkup(row_width=len(SEARCH_LENGTHS))
     kb.add(
         *[
-            types.InlineKeyboardButton(
-                f"{length}", callback_data=f"search:len:{length}"
-            )
+            InlineKeyboardButton(f"{length}", callback_data=f"search:len:{length}")
             for length in SEARCH_LENGTHS
         ]
     )
-    kb.add(types.InlineKeyboardButton("⬅️ Главное меню", callback_data="menu:main"))
+    kb.add(InlineKeyboardButton("⬅️ Главное меню", callback_data="menu:main"))
     return kb
 
 
-def results_menu(length: int) -> types.InlineKeyboardMarkup:
-    kb = types.InlineKeyboardMarkup(row_width=1)
+def results_menu(length: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardMarkup(row_width=1)
     kb.add(
-        types.InlineKeyboardButton("🔁 Ещё 5", callback_data=f"search:more:{length}"),
-        types.InlineKeyboardButton("⬅️ Главное меню", callback_data="menu:main"),
+        InlineKeyboardButton("🔁 Ещё 5", callback_data=f"search:more:{length}"),
+        InlineKeyboardButton("⬅️ Главное меню", callback_data="menu:main"),
     )
     return kb
 
 
-def buy_menu() -> types.InlineKeyboardMarkup:
-    kb = types.InlineKeyboardMarkup(row_width=1)
+def buy_menu() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardMarkup(row_width=1)
     kb.add(
-        types.InlineKeyboardButton(
-            "💎 Подписка на месяц — 50 ⭐", callback_data="buy:sub"
-        ),
-        types.InlineKeyboardButton("⭐ Доп. запрос — 10 ⭐", callback_data="buy:extra"),
-        types.InlineKeyboardButton("⬅️ Главное меню", callback_data="menu:main"),
+        InlineKeyboardButton("💎 Подписка на месяц — 50 ⭐", callback_data="buy:sub"),
+        InlineKeyboardButton("⭐ Доп. запрос — 10 ⭐", callback_data="buy:extra"),
+        InlineKeyboardButton("⬅️ Главное меню", callback_data="menu:main"),
     )
     return kb
 
@@ -520,60 +514,43 @@ def cb_buy_menu(call):
 @bot.callback_query_handler(func=lambda call: call.data == "buy:sub")
 def cb_buy_sub(call):
     bot.answer_callback_query(call.id)
-    prices = [
-        types.LabeledPrice(label="Подписка UnixScan (30 дней)", amount=SUB_PRICE_STARS)
-    ]
     bot.send_invoice(
         call.message.chat.id,
         title="Подписка UnixScan",
         description="30 дней повышенного лимита поисков (10 в день).",
-        invoice_payload=PAYLOAD_SUBSCRIPTION,
-        provider_token=STARS_PROVIDER_TOKEN,
-        currency=STARS_CURRENCY,
-        prices=prices,
+        payload=PAYLOAD_SUBSCRIPTION,
+        amount_stars=SUB_PRICE_STARS,
     )
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "buy:extra")
 def cb_buy_extra(call):
     bot.answer_callback_query(call.id)
-    prices = [types.LabeledPrice(label="Доп. запрос", amount=EXTRA_PRICE_STARS)]
     bot.send_invoice(
         call.message.chat.id,
         title="Доп. запрос UnixScan",
         description="+1 поиск сверх дневного лимита.",
-        invoice_payload=PAYLOAD_EXTRA_REQUEST,
-        provider_token=STARS_PROVIDER_TOKEN,
-        currency=STARS_CURRENCY,
-        prices=prices,
+        payload=PAYLOAD_EXTRA_REQUEST,
+        amount_stars=EXTRA_PRICE_STARS,
     )
 
 
 @bot.pre_checkout_query_handler(func=lambda query: True)
 def handle_pre_checkout(query):
     bot.answer_pre_checkout_query(query.id, ok=True)
-
-
-@bot.message_handler(content_types=["successful_payment"])
-def handle_successful_payment(message):
-    payment = message.successful_payment
-    payload = payment.invoice_payload
-    amount = payment.total_amount
-    record_payment(message.chat.id, payload, amount)
+    user_id = query.from_user.id
+    payload = query.invoice_payload
+    amount = query.total_amount
+    record_payment(user_id, payload, amount)
     if payload == PAYLOAD_SUBSCRIPTION:
-        grant_subscription(message.chat.id)
+        grant_subscription(user_id)
         text = f"✅ Подписка на {SUB_DURATION_DAYS} дней активирована!\nТеперь доступно 10 поисков в день."
     elif payload == PAYLOAD_EXTRA_REQUEST:
-        grant_extra_request(message.chat.id)
+        grant_extra_request(user_id)
         text = "✅ Доп. запрос добавлен! Можно использовать сверх дневного лимита."
     else:
         text = "✅ Оплата получена."
-    bot.send_message(
-        message.chat.id,
-        text,
-        parse_mode="HTML",
-        reply_markup=main_menu(message.chat.id),
-    )
+    bot.send_message(user_id, text, parse_mode="HTML", reply_markup=main_menu(user_id))
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "menu:admin")
