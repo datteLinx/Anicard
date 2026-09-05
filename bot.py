@@ -24,7 +24,7 @@ ai = OpenAI(
     api_key=HF_TOKEN
 )
 
-MODEL = "HuggingFaceTB/SmolLM2-1.7B-Instruct"
+MODEL = "openai/gpt-oss-20b"
 
 SYSTEM_PROMPT = """
 You are AniAI, an anime-inspired female AI created by Слип.
