@@ -7,21 +7,21 @@ from openai import OpenAI
 
 
 UNIXGRAM_TOKEN = os.getenv("UNIXGRAM_TOKEN")
-HF_TOKEN = os.getenv("HF_TOKEN")
+GROQ_TOKEN = os.getenv("GROQ_TOKEN")
 
 if not UNIXGRAM_TOKEN:
     raise RuntimeError("Не задан UNIXGRAM_TOKEN")
 
-if not HF_TOKEN:
-    raise RuntimeError("Не задан HF_TOKEN")
+if not GROQ_TOKEN:
+    raise RuntimeError("Не задан GROQ_TOKEN")
 
 
 bot = Bot(UNIXGRAM_TOKEN)
 
 
 ai = OpenAI(
-    base_url="https://router.huggingface.co/v1",
-    api_key=HF_TOKEN
+    base_url="https://api.groq.com/openai/v1",
+    api_key=GROQ_TOKEN
 )
 
 MODEL = "openai/gpt-oss-20b"
