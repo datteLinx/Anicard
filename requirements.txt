@@ -1,1 +1,3 @@
-unixgram-py==1.0.0
+unixgram
+supabase
+python-dotenv
