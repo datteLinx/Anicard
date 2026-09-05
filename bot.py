@@ -646,7 +646,7 @@ def callback_open_card(query):
 
         bot.send_message(
             query.message.chat.id,
-            "Сначала используй /start."
+            "Сначала /start."
         )
 
         return
@@ -695,7 +695,7 @@ def callback_inventory(query):
         return
 
     lines = [
-        "🎒 ТВОЯ КОЛЛЕКЦИЯ",
+        "🎒 Коллекция",
         ""
     ]
 
@@ -744,7 +744,7 @@ def callback_profile(query):
 
         bot.send_message(
             query.message.chat.id,
-            "Сначала используй /start."
+            "Сначала /start."
         )
 
         return
@@ -777,13 +777,13 @@ def callback_profile(query):
 
     bot.send_message(
         query.message.chat.id,
-        "👤 ПРОФИЛЬ\n\n"
-        f"👤 {name}\n"
-        f"⭐ Очки: {user['points']}\n"
-        f"✨ XP: {user['xp']}\n"
-        f"🏅 Уровень: {get_level(user['xp'])}\n"
-        f"🎴 Карточек: {cards_count}\n"
-        f"📚 Уникальных: {unique_count}"
+        "👤 Профиль\n\n"
+        f" {name}\n"
+        f" Очки: {user['points']}\n"
+        f" XP: {user['xp']}\n"
+        f" Уровень: {get_level(user['xp'])}\n"
+        f" Карточек: {cards_count}\n"
+        f" Уникальных: {unique_count}"
     )
 
 
@@ -824,7 +824,7 @@ def callback_top(query):
         return
 
     lines = [
-        "🏆 ТОП ANICARDS",
+        "🏆 Топ",
         ""
     ]
 
@@ -838,7 +838,7 @@ def callback_top(query):
 
         lines.append(
             f"{i + 1}. {name} — "
-            f"{user['points']} ⭐"
+            f"{user['points']}"
         )
 
     bot.send_message(
@@ -860,11 +860,12 @@ def start(message):
 
     bot.send_message(
         message.chat.id,
-        "🎴 ANICARDS\n\n"
+        "🎴 Anicards\n\n"
         "Коллекционируй карточки аниме-персонажей.\n\n"
         "Открывай карточки и собирай коллекцию.\n"
         "За карточки получаешь XP и очки.\n\n"
-        "Нажми кнопку ниже.",
+        "Нажми кнопку ниже"
+        "Автор: @drowsy",
         reply_markup=main_keyboard()
     )
 
@@ -882,7 +883,7 @@ def help_command(message):
 
     bot.send_message(
         message.chat.id,
-        "🎴 ANICARDS\n\n"
+        "🎴 Anicards\n\n"
         "/card — открыть карточку\n"
         "/inventory — коллекция\n"
         "/profile — профиль\n"
@@ -951,7 +952,7 @@ def inventory(message):
         return
 
     lines = [
-        "🎒 ТВОЯ КОЛЛЕКЦИЯ",
+        "🎒 Коллекция",
         ""
     ]
 
@@ -1025,13 +1026,13 @@ def profile(message):
 
     bot.send_message(
         message.chat.id,
-        "👤 ПРОФИЛЬ\n\n"
-        f"👤 {name}\n"
-        f"⭐ Очки: {user['points']}\n"
-        f"✨ XP: {user['xp']}\n"
-        f"🏅 Уровень: {get_level(user['xp'])}\n"
-        f"🎴 Карточек: {cards_count}\n"
-        f"📚 Уникальных: {unique_count}"
+        " Профиль\n\n"
+        f" {name}\n"
+        f" Очки: {user['points']}\n"
+        f" XP: {user['xp']}\n"
+        f" Уровень: {get_level(user['xp'])}\n"
+        f" Карточек: {cards_count}\n"
+        f" Уникальных: {unique_count}"
     )
 
 
@@ -1072,7 +1073,7 @@ def top(message):
         return
 
     lines = [
-        "🏆 ТОП ANICARDS",
+        "🏆 Топ",
         ""
     ]
 
