@@ -1873,7 +1873,7 @@ def donation_callback(query):
     bot.send_invoice(
         query.message.chat.id,
         "Поддержка Anicards",
-        f"Донат {amount} Telegram Stars",
+        f"Донат {amount} звезд",
         payload=f"donate-{amount}",
         amount_stars=amount
     )
