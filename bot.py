@@ -1,4 +1,3 @@
-
 import os
 import random
 import threading
@@ -34,6 +33,16 @@ bot = Bot(BOT_TOKEN)
 db = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 app = Flask(__name__)
+
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+def edit_html(chat_id, message_id, text, reply_markup=None):
+    """edit_message_text() signature is (text, chat_id, message_id, reply_markup)
+    and has no parse_mode kwarg - unlike send_message()."""
+    bot.edit_message_text(text, chat_id, message_id, reply_markup=reply_markup)
 
 
 # ============================================================
@@ -624,21 +633,19 @@ def callback(query):
     bot.answer_callback_query(query.id)
 
     if data == "back":
-        bot.edit_message_text(
+        edit_html(
             user_id,
             query.message.message_id,
             start_text(),
-            parse_mode="HTML",
             reply_markup=main_menu()
         )
         return
 
     if data == "find":
-        bot.edit_message_text(
+        edit_html(
             user_id,
             query.message.message_id,
             find_text(),
-            parse_mode="HTML",
             reply_markup=length_menu()
         )
         return
@@ -646,11 +653,10 @@ def callback(query):
     if data.startswith("len_"):
         length = int(data.split("_")[1])
 
-        bot.edit_message_text(
+        edit_html(
             user_id,
             query.message.message_id,
             style_text(length),
-            parse_mode="HTML",
             reply_markup=style_menu(length)
         )
         return
@@ -698,11 +704,10 @@ def callback(query):
             "⭐ Дополнительный поиск — 10 звёзд."
         )
 
-        bot.edit_message_text(
+        edit_html(
             user_id,
             query.message.message_id,
             text,
-            parse_mode="HTML",
             reply_markup=back_button()
         )
 
@@ -712,11 +717,10 @@ def callback(query):
         if user_id != ADMIN_ID:
             return
 
-        bot.edit_message_text(
+        edit_html(
             user_id,
             query.message.message_id,
             "🛠 <b>Админ-панель</b>",
-            parse_mode="HTML",
             reply_markup=admin_menu()
         )
 
@@ -762,11 +766,10 @@ def perform_search(user_id, message_id, length, style):
             "или ⭐ купи один дополнительный поиск."
         )
 
-        bot.edit_message_text(
+        edit_html(
             user_id,
             message_id,
             text,
-            parse_mode="HTML",
             reply_markup=main_menu()
         )
 
@@ -774,11 +777,10 @@ def perform_search(user_id, message_id, length, style):
 
     consume_search(user_id, search_type)
 
-    bot.edit_message_text(
+    edit_html(
         user_id,
         message_id,
-        "🔎 Проверяю свободные ники...",
-        parse_mode="HTML"
+        "🔎 Проверяю свободные ники..."
     )
 
     found, generated = find_available(
@@ -820,11 +822,10 @@ def perform_search(user_id, message_id, length, style):
             "Попробуй другой стиль или длину."
         )
 
-    bot.edit_message_text(
+    edit_html(
         user_id,
         message_id,
         result,
-        parse_mode="HTML",
         reply_markup=result_menu()
     )
 
@@ -863,11 +864,10 @@ def show_subscription(user_id, message_id=None):
 
     if message_id:
 
-        bot.edit_message_text(
+        edit_html(
             user_id,
             message_id,
             text,
-            parse_mode="HTML",
             reply_markup=kb
         )
 
@@ -1026,11 +1026,10 @@ def show_stats(user_id, message_id=None):
 
     if message_id:
 
-        bot.edit_message_text(
+        edit_html(
             user_id,
             message_id,
             text,
-            parse_mode="HTML",
             reply_markup=back_button()
         )
 
@@ -1079,11 +1078,10 @@ def show_admin_stats(user_id, message_id):
         f"💳 Платежей: <b>{payments_count}</b>"
     )
 
-    bot.edit_message_text(
+    edit_html(
         user_id,
         message_id,
         text,
-        parse_mode="HTML",
         reply_markup=back_button()
     )
 
@@ -1122,11 +1120,10 @@ def show_admin_users(user_id, message_id):
 
         text = "\n".join(lines)
 
-    bot.edit_message_text(
+    edit_html(
         user_id,
         message_id,
         text,
-        parse_mode="HTML",
         reply_markup=back_button()
     )
 
@@ -1160,4 +1157,3 @@ if __name__ == "__main__":
     print("UnixScan started")
 
     bot.polling()
-
