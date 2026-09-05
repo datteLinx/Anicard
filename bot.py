@@ -77,36 +77,6 @@ EXTRA_REQUEST_PRICE = 10
 USERNAME_CHECK_URL = "https://unixgram.com/api/account/username/check"
 
 STYLES = {
-    "soft": {
-        "name": "Мягкие",
-        "consonants": [
-            "l", "m", "n", "r", "s", "v", "w", "y"
-        ],
-        "vowels": [
-            "a", "e", "i", "o", "u"
-        ]
-    },
-
-    "sharp": {
-        "name": "Звучные",
-        "consonants": [
-            "k", "t", "x", "z", "d", "g", "v", "r", "s"
-        ],
-        "vowels": [
-            "a", "e", "i", "o", "u"
-        ]
-    },
-
-    "rare": {
-        "name": "Редкие",
-        "consonants": [
-            "q", "x", "z", "v", "j", "w", "k", "y"
-        ],
-        "vowels": [
-            "a", "e", "i", "o", "u"
-        ]
-    },
-
     "mixed": {
         "name": "Смешанные",
         "consonants": [
@@ -201,41 +171,6 @@ def length_menu():
         InlineKeyboardButton(
             "◀️ Назад",
             callback_data="back"
-        )
-    )
-
-    return kb
-
-
-def style_menu(length):
-    kb = InlineKeyboardMarkup()
-
-    kb.row(
-        InlineKeyboardButton(
-            "🌙 Мягкие",
-            callback_data=f"style_soft_{length}"
-        ),
-        InlineKeyboardButton(
-            "⚡ Звучные",
-            callback_data=f"style_sharp_{length}"
-        )
-    )
-
-    kb.row(
-        InlineKeyboardButton(
-            "💠 Редкие",
-            callback_data=f"style_rare_{length}"
-        ),
-        InlineKeyboardButton(
-            "🔷 Смешанные",
-            callback_data=f"style_mixed_{length}"
-        )
-    )
-
-    kb.row(
-        InlineKeyboardButton(
-            "◀️ Назад",
-            callback_data="find"
         )
     )
 
@@ -543,14 +478,6 @@ def find_text():
     )
 
 
-def style_text(length):
-    return (
-        f"🔎 <b>Поиск ников</b>\n\n"
-        f"Длина: <b>{length}</b>\n\n"
-        "Выбери стиль:"
-    )
-
-
 # ============================================================
 # START
 # ============================================================
@@ -653,25 +580,11 @@ def callback(query):
     if data.startswith("len_"):
         length = int(data.split("_")[1])
 
-        edit_html(
-            user_id,
-            query.message.message_id,
-            style_text(length),
-            reply_markup=style_menu(length)
-        )
-        return
-
-    if data.startswith("style_"):
-        parts = data.split("_")
-
-        style = parts[1]
-        length = int(parts[2])
-
         perform_search(
             user_id,
             query.message.message_id,
             length,
-            style
+            "mixed"
         )
 
         return
@@ -810,7 +723,6 @@ def perform_search(user_id, message_id, length, style):
             "🔵 <b>Свободные ники</b>\n\n"
             + "\n".join(lines)
             + "\n\n"
-            f"Стиль: <b>{STYLES[style]['name']}</b>\n"
             f"Длина: <b>{length}</b>"
         )
 
