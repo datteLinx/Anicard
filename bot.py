@@ -90,8 +90,7 @@ def start(message):
     bot.send_message(
         message.chat.id,
         "Привет! Я aniAI.\n\n"
-        "Я использую gpt-oss-120b.\n"
-        "Просто напиши мне сообщение."
+        "Я создан для общения. Просто напиши мне сообщение."
     )
 
 
