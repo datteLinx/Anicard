@@ -1,6 +1,5 @@
 import os
 import random
-import string
 import threading
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -23,7 +22,6 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-
 ADMIN_ID = int(os.getenv("ADMIN_ID", "169"))
 
 if not BOT_TOKEN:
@@ -37,7 +35,7 @@ if not SUPABASE_KEY:
 
 
 # ============================================================
-# SERVICES
+# INIT
 # ============================================================
 
 bot = Bot(BOT_TOKEN)
@@ -61,16 +59,16 @@ MAX_WORKERS = 4
 
 
 # ============================================================
-# HTTP SERVER FOR RENDER
+# RENDER WEB SERVICE
 # ============================================================
 
 @app.route("/")
-def health():
+def index():
     return "UnixScan is running", 200
 
 
 @app.route("/health")
-def health_check():
+def health():
     return "OK", 200
 
 
@@ -86,6 +84,49 @@ def run_web():
 
 
 # ============================================================
+# HELPERS
+# ============================================================
+
+def now_kyiv():
+    return datetime.now(KYIV)
+
+
+def today():
+    return now_kyiv().date().isoformat()
+
+
+def edit(call, text, keyboard=None):
+    kwargs = {
+        "parse_mode": "HTML"
+    }
+
+    if keyboard is not None:
+        kwargs["reply_markup"] = keyboard
+
+    bot.edit_message_text(
+        call.message.chat.id,
+        call.message.message_id,
+        text,
+        **kwargs
+    )
+
+
+def send(chat_id, text, keyboard=None):
+    kwargs = {
+        "parse_mode": "HTML"
+    }
+
+    if keyboard is not None:
+        kwargs["reply_markup"] = keyboard
+
+    bot.send_message(
+        chat_id,
+        text,
+        **kwargs
+    )
+
+
+# ============================================================
 # KEYBOARDS
 # ============================================================
 
@@ -93,23 +134,41 @@ def main_menu(user_id=None):
 
     rows = [
         [
-            InlineKeyboardButton("🔎 Найти ники", callback_data="search")
+            InlineKeyboardButton(
+                "🔎 Найти ники",
+                callback_data="search"
+            )
         ],
         [
-            InlineKeyboardButton("💎 Подписка", callback_data="subscription"),
-            InlineKeyboardButton("⭐ Купить запрос", callback_data="buy_request")
+            InlineKeyboardButton(
+                "💎 Подписка",
+                callback_data="subscription"
+            ),
+            InlineKeyboardButton(
+                "⭐ Купить запрос",
+                callback_data="buy_request"
+            )
         ],
         [
-            InlineKeyboardButton("📊 Моя статистика", callback_data="stats")
+            InlineKeyboardButton(
+                "📊 Моя статистика",
+                callback_data="stats"
+            )
         ],
         [
-            InlineKeyboardButton("ℹ️ Как это работает", callback_data="how")
+            InlineKeyboardButton(
+                "ℹ️ Как это работает",
+                callback_data="how"
+            )
         ]
     ]
 
     if user_id == ADMIN_ID:
         rows.append([
-            InlineKeyboardButton("🛠 Админ-панель", callback_data="admin")
+            InlineKeyboardButton(
+                "🛠 Админ-панель",
+                callback_data="admin"
+            )
         ])
 
     return InlineKeyboardMarkup(rows)
@@ -119,15 +178,30 @@ def search_menu():
 
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("4 буквы", callback_data="len_4"),
-            InlineKeyboardButton("5 букв", callback_data="len_5")
+            InlineKeyboardButton(
+                "4 буквы",
+                callback_data="len_4"
+            ),
+            InlineKeyboardButton(
+                "5 букв",
+                callback_data="len_5"
+            )
         ],
         [
-            InlineKeyboardButton("6 букв", callback_data="len_6"),
-            InlineKeyboardButton("7 букв", callback_data="len_7")
+            InlineKeyboardButton(
+                "6 букв",
+                callback_data="len_6"
+            ),
+            InlineKeyboardButton(
+                "7 букв",
+                callback_data="len_7"
+            )
         ],
         [
-            InlineKeyboardButton("↩️ Назад", callback_data="back")
+            InlineKeyboardButton(
+                "↩️ Назад",
+                callback_data="back"
+            )
         ]
     ])
 
@@ -160,7 +234,10 @@ def style_menu(length):
             )
         ],
         [
-            InlineKeyboardButton("↩️ Назад", callback_data="search")
+            InlineKeyboardButton(
+                "↩️ Назад",
+                callback_data="search"
+            )
         ]
     ])
 
@@ -193,13 +270,21 @@ def after_search_menu():
     ])
 
 
+def back_menu():
+
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "↩️ Назад",
+                callback_data="back"
+            )
+        ]
+    ])
+
+
 # ============================================================
 # DATABASE
 # ============================================================
-
-def today():
-    return datetime.now(KYIV).date().isoformat()
-
 
 def get_user(user_id, username=None):
 
@@ -213,27 +298,33 @@ def get_user(user_id, username=None):
     )
 
     if result.data:
+
         user = result.data[0]
 
         if user.get("request_date") != today():
+
             supabase.table("users").update({
                 "requests_today": 0,
                 "request_date": today()
             }).eq(
-                "user_id", user_id
+                "user_id",
+                user_id
             ).execute()
 
             user["requests_today"] = 0
             user["request_date"] = today()
 
-        if username is not None and user.get("username") != username:
-            supabase.table("users").update({
-                "username": username
-            }).eq(
-                "user_id", user_id
-            ).execute()
+        if username is not None:
+            if user.get("username") != username:
 
-            user["username"] = username
+                supabase.table("users").update({
+                    "username": username
+                }).eq(
+                    "user_id",
+                    user_id
+                ).execute()
+
+                user["username"] = username
 
         return user
 
@@ -259,6 +350,7 @@ def get_user(user_id, username=None):
 
 
 def update_user(user_id, data):
+
     return (
         supabase
         .table("users")
@@ -280,6 +372,7 @@ def subscription_active(user):
         return False
 
     try:
+
         dt = datetime.fromisoformat(
             until.replace("Z", "+00:00")
         )
@@ -287,56 +380,82 @@ def subscription_active(user):
         return dt > datetime.now(dt.tzinfo)
 
     except Exception:
+
         return False
 
 
 def subscription_text(user):
 
-    if not subscription_active(user):
-        return (
-            "💎 <b>Подписка UnixScan</b>\n\n"
-            "⭐ Цена: <b>50 Stars</b>\n"
-            "🔎 Лимит: <b>10 поисков в день</b>\n"
-            "📅 Срок: <b>30 дней</b>\n\n"
-            "После оплаты подписка активируется автоматически."
+    if subscription_active(user):
+
+        until = user.get(
+            "subscription_until",
+            ""
         )
 
-    until = user.get("subscription_until", "")
+        return (
+            "💎 <b>UnixScan Premium</b>\n\n"
+            "✅ Подписка активна\n\n"
+            f"📅 До: <b>{until[:10]}</b>\n"
+            "🔎 До 10 поисков в день."
+        )
 
     return (
-        "💎 <b>Подписка уже активна</b>\n\n"
-        f"📅 До: <code>{until[:10]}</code>\n"
-        "🔎 Доступно до 10 поисков в день."
+        "💎 <b>UnixScan Premium</b>\n\n"
+        "⭐ Цена: <b>50 Stars</b>\n"
+        "🔎 <b>10 поисков в день</b>\n"
+        "📅 Срок: <b>30 дней</b>\n\n"
+        "После оплаты подписка активируется автоматически."
     )
 
 
 # ============================================================
-# REQUEST LIMITS
+# LIMITS
 # ============================================================
 
 def remaining_requests(user):
 
-    used = int(user.get("requests_today", 0))
-    extra = int(user.get("extra_requests", 0))
+    used = int(
+        user.get("requests_today", 0)
+    )
+
+    extra = int(
+        user.get("extra_requests", 0)
+    )
 
     if subscription_active(user):
-        normal_left = max(0, SUB_DAILY - used)
-    else:
-        normal_left = max(0, FREE_DAILY - used)
 
-    return normal_left + extra
+        normal = max(
+            0,
+            SUB_DAILY - used
+        )
+
+    else:
+
+        normal = max(
+            0,
+            FREE_DAILY - used
+        )
+
+    return normal + extra
 
 
 def consume_request(user_id):
 
     user = get_user(user_id)
 
-    used = int(user.get("requests_today", 0))
-    extra = int(user.get("extra_requests", 0))
+    used = int(
+        user.get("requests_today", 0)
+    )
+
+    extra = int(
+        user.get("extra_requests", 0)
+    )
 
     if subscription_active(user):
 
         if used < SUB_DAILY:
+
             update_user(
                 user_id,
                 {
@@ -349,6 +468,7 @@ def consume_request(user_id):
     else:
 
         if used < FREE_DAILY:
+
             update_user(
                 user_id,
                 {
@@ -373,13 +493,12 @@ def consume_request(user_id):
 
 
 # ============================================================
-# USERNAME GENERATOR
+# NICK GENERATOR
 # ============================================================
 
 CONSONANTS = "bcdfghjklmnpqrstvwxyz"
 VOWELS = "aeiou"
 
-# Более приятные сочетания.
 GOOD_STARTS = [
     "dr",
     "kr",
@@ -402,7 +521,9 @@ BAD_PAIRS = {
     "qx",
     "xq",
     "qz",
+    "zq",
     "zx",
+    "xz",
     "jv",
     "vj",
     "wq",
@@ -413,16 +534,8 @@ BAD_PAIRS = {
     "jj"
 }
 
-
-def random_char(kind):
-
-    if kind == "C":
-        return random.choice(CONSONANTS)
-
-    return random.choice(VOWELS)
-
-
 PATTERNS = {
+
     "soft": [
         "CVCV",
         "CVCVC",
@@ -460,18 +573,25 @@ PATTERNS = {
 }
 
 
+def random_char(kind):
+
+    if kind == "C":
+        return random.choice(CONSONANTS)
+
+    return random.choice(VOWELS)
+
+
 def build_pattern(length, style):
 
-    patterns = [
-        p for p in PATTERNS[style]
-        if len(p) == length
+    available = [
+        pattern
+        for pattern in PATTERNS[style]
+        if len(pattern) == length
     ]
 
-    if patterns:
-        return random.choice(patterns)
+    if available:
+        return random.choice(available)
 
-    # Если для конкретной длины шаблонов нет —
-    # строим автоматически.
     pattern = []
 
     for i in range(length):
@@ -479,7 +599,7 @@ def build_pattern(length, style):
         if i == 0:
             pattern.append("C")
 
-        elif i % 2 == 1:
+        elif i % 2:
             pattern.append("V")
 
         else:
@@ -490,38 +610,61 @@ def build_pattern(length, style):
 
 def generate_username(length, style):
 
-    pattern = build_pattern(length, style)
+    pattern = build_pattern(
+        length,
+        style
+    )
 
     chars = []
 
-    for i, kind in enumerate(pattern):
+    # Иногда используем приятное начало.
+    if length >= 5 and random.random() < 0.2:
 
-        if i == 0 and length >= 5 and random.random() < 0.18:
+        start = random.choice(
+            GOOD_STARTS
+        )
 
-            start = random.choice(GOOD_STARTS)
+        if len(start) < length:
 
-            if len(start) <= length:
-                chars.extend(start)
+            chars.extend(start)
 
-                remaining = length - len(chars)
+            while len(chars) < length:
 
-                for j in range(remaining):
-                    next_kind = "V" if j % 2 == 0 else "C"
-                    chars.append(random_char(next_kind))
+                if len(chars) % 2:
+                    chars.append(
+                        random.choice(VOWELS)
+                    )
+                else:
+                    chars.append(
+                        random.choice(CONSONANTS)
+                    )
 
-                break
+            name = "".join(chars)
 
-        chars.append(random_char(kind))
+        else:
 
-    name = "".join(chars)[:length].lower()
+            name = "".join(
+                random_char(x)
+                for x in pattern
+            )
 
-    # Убираем неприятные сочетания.
+    else:
+
+        name = "".join(
+            random_char(x)
+            for x in pattern
+        )
+
+    name = name[:length].lower()
+
     for pair in BAD_PAIRS:
 
         if pair in name:
-            return generate_username(length, style)
+            return generate_username(
+                length,
+                style
+            )
 
-    # Не допускаем три одинаковых подряд.
     for i in range(len(name) - 2):
 
         if (
@@ -529,18 +672,28 @@ def generate_username(length, style):
             == name[i + 1]
             == name[i + 2]
         ):
-            return generate_username(length, style)
+            return generate_username(
+                length,
+                style
+            )
 
     return name.capitalize()
 
 
-def generate_candidates(length, style, count=50):
+def generate_candidates(
+    length,
+    style,
+    count=60
+):
 
     result = set()
 
     attempts = 0
 
-    while len(result) < count and attempts < count * 10:
+    while (
+        len(result) < count
+        and attempts < count * 10
+    ):
 
         attempts += 1
 
@@ -549,10 +702,8 @@ def generate_candidates(length, style, count=50):
             style
         )
 
-        if len(name) != length:
-            continue
-
-        result.add(name)
+        if len(name) == length:
+            result.add(name)
 
     return list(result)
 
@@ -586,12 +737,22 @@ def check_username(username):
 
         return username, available
 
-    except Exception:
+    except Exception as error:
+
+        print(
+            "USERNAME CHECK ERROR:",
+            username,
+            repr(error)
+        )
 
         return username, False
 
 
-def find_available(length, style, amount=5):
+def find_available(
+    length,
+    style,
+    amount=5
+):
 
     candidates = generate_candidates(
         length,
@@ -605,19 +766,21 @@ def find_available(length, style, amount=5):
         max_workers=MAX_WORKERS
     ) as executor:
 
-        futures = [
+        futures = {
             executor.submit(
                 check_username,
                 username
-            )
+            ): username
             for username in candidates
-        ]
+        }
 
         for future in as_completed(futures):
 
-            username, free = future.result()
+            username, is_available = (
+                future.result()
+            )
 
-            if free:
+            if is_available:
 
                 available.append(username)
 
@@ -628,7 +791,7 @@ def find_available(length, style, amount=5):
 
 
 # ============================================================
-# SEARCH HISTORY
+# SEARCH STATS
 # ============================================================
 
 def save_search(
@@ -655,20 +818,28 @@ def update_search_stats(
 
     user = get_user(user_id)
 
+    total_searches = int(
+        user.get("total_searches", 0)
+    )
+
+    found_nicks = int(
+        user.get("found_nicks", 0)
+    )
+
     update_user(
         user_id,
         {
             "total_searches":
-                int(user.get("total_searches", 0)) + 1,
+                total_searches + 1,
 
             "found_nicks":
-                int(user.get("found_nicks", 0)) + found
+                found_nicks + found
         }
     )
 
 
 # ============================================================
-# PAYMENT
+# PAYMENTS
 # ============================================================
 
 def payment_exists(payload):
@@ -698,38 +869,44 @@ def save_payment(
     }).execute()
 
 
-# ============================================================
-# SEND INVOICE
-# ============================================================
+def send_subscription_invoice(
+    chat_id
+):
 
-def send_subscription_invoice(chat_id):
-
-    payload = f"sub:{chat_id}:{random.randint(100000, 999999)}"
+    payload = (
+        f"sub:{chat_id}:"
+        f"{random.randint(100000, 999999)}"
+    )
 
     bot.send_invoice(
         chat_id,
         "💎 UnixScan Premium",
-        "10 поисков ников в день на 30 дней",
+        "10 поисков в день на 30 дней",
         payload=payload,
         amount_stars=SUB_PRICE
     )
 
 
-def send_extra_invoice(chat_id):
+def send_extra_invoice(
+    chat_id
+):
 
-    payload = f"extra:{chat_id}:{random.randint(100000, 999999)}"
+    payload = (
+        f"extra:{chat_id}:"
+        f"{random.randint(100000, 999999)}"
+    )
 
     bot.send_invoice(
         chat_id,
         "⭐ Дополнительный запрос",
-        "Один дополнительный поиск ников",
+        "Один дополнительный поиск",
         payload=payload,
         amount_stars=EXTRA_PRICE
     )
 
 
 # ============================================================
-# /START
+# START
 # ============================================================
 
 @bot.message_handler(commands=["start"])
@@ -757,10 +934,10 @@ def start(message):
         "🎁 Бесплатно: <b>3 поиска в день</b>"
     )
 
-    bot.send_message(
+    send(
         message.chat.id,
         text,
-        reply_markup=main_menu(user_id)
+        main_menu(user_id)
     )
 
 
@@ -772,21 +949,21 @@ def start(message):
 def callbacks(call):
 
     user_id = call.from_user.id
+    data = call.data
 
     # --------------------------------------------------------
     # BACK
     # --------------------------------------------------------
 
-    if call.data == "back":
+    if data == "back":
 
-        bot.edit_message_text(
-            call.message.chat.id,
-            call.message.message_id,
+        edit(
+            call,
             (
                 "🔵 <b>UnixScan</b>\n\n"
                 "Выбери действие:"
             ),
-            reply_markup=main_menu(user_id)
+            main_menu(user_id)
         )
 
         return
@@ -795,16 +972,15 @@ def callbacks(call):
     # SEARCH
     # --------------------------------------------------------
 
-    if call.data == "search":
+    if data == "search":
 
-        bot.edit_message_text(
-            call.message.chat.id,
-            call.message.message_id,
+        edit(
+            call,
             (
                 "🔎 <b>Поиск ников</b>\n\n"
                 "Выбери длину:"
             ),
-            reply_markup=search_menu()
+            search_menu()
         )
 
         return
@@ -813,20 +989,19 @@ def callbacks(call):
     # LENGTH
     # --------------------------------------------------------
 
-    if call.data.startswith("len_"):
+    if data.startswith("len_"):
 
         length = int(
-            call.data.split("_")[1]
+            data.split("_")[1]
         )
 
-        bot.edit_message_text(
-            call.message.chat.id,
-            call.message.message_id,
+        edit(
+            call,
             (
                 f"🔎 Длина: <b>{length}</b>\n\n"
-                "Какой стиль ищем?"
+                "Выбери стиль:"
             ),
-            reply_markup=style_menu(length)
+            style_menu(length)
         )
 
         return
@@ -835,38 +1010,35 @@ def callbacks(call):
     # STYLE
     # --------------------------------------------------------
 
-    if call.data.startswith("style_"):
+    if data.startswith("style_"):
 
-        parts = call.data.split("_")
+        parts = data.split("_")
 
         style = parts[1]
         length = int(parts[2])
 
-        user = get_user(user_id)
-
         if not consume_request(user_id):
 
-            bot.edit_message_text(
-                call.message.chat.id,
-                call.message.message_id,
+            edit(
+                call,
                 (
                     "🔒 <b>Лимит закончился</b>\n\n"
-                    "У тебя больше нет доступных поисков.\n\n"
-                    "💎 Подписка — 50 ⭐\n"
-                    "⭐ Дополнительный поиск — 10 ⭐"
+                    "У тебя больше нет доступных "
+                    "поисков.\n\n"
+                    "💎 Подписка — <b>50 ⭐</b>\n"
+                    "⭐ Дополнительный поиск — <b>10 ⭐</b>"
                 ),
-                reply_markup=after_search_menu()
+                after_search_menu()
             )
 
             return
 
-        bot.edit_message_text(
-            call.message.chat.id,
-            call.message.message_id,
+        edit(
+            call,
             (
                 "🔎 <b>Ищу ники...</b>\n\n"
-                f"📏 Длина: {length}\n"
-                f"🎨 Стиль: {style}\n\n"
+                f"📏 Длина: <b>{length}</b>\n"
+                f"🎨 Стиль: <b>{style}</b>\n\n"
                 "⏳ Проверяю доступность..."
             )
         )
@@ -876,24 +1048,23 @@ def callbacks(call):
             available = find_available(
                 length,
                 style,
-                amount=5
+                5
             )
 
-        except Exception as e:
+        except Exception as error:
 
             print(
                 "SEARCH ERROR:",
-                repr(e)
+                repr(error)
             )
 
-            bot.edit_message_text(
-                call.message.chat.id,
-                call.message.message_id,
+            edit(
+                call,
                 (
-                    "❌ Не удалось выполнить поиск.\n\n"
+                    "❌ <b>Ошибка поиска</b>\n\n"
                     "Попробуй ещё раз."
                 ),
-                reply_markup=after_search_menu()
+                after_search_menu()
             )
 
             return
@@ -911,34 +1082,36 @@ def callbacks(call):
             len(available)
         )
 
-        if not available:
+        if available:
 
-            text = (
-                "🔎 <b>Результат</b>\n\n"
-                "К сожалению, свободных вариантов "
-                "не найдено.\n\n"
-                "Попробуй другой стиль или длину."
-            )
+            lines = []
 
-        else:
+            for nickname in available:
 
-            lines = [
-                f"💠 <code>{name}</code>"
-                for name in available
-            ]
+                lines.append(
+                    f"💠 <code>{nickname}</code>"
+                )
 
             text = (
                 "🔵 <b>Свободные ники</b>\n\n"
                 + "\n".join(lines)
                 + "\n\n"
-                "⚡ Ники проверены прямо сейчас."
+                "⚡ Проверено прямо сейчас."
             )
 
-        bot.edit_message_text(
-            call.message.chat.id,
-            call.message.message_id,
+        else:
+
+            text = (
+                "🔎 <b>Ничего не найдено</b>\n\n"
+                "Свободных вариантов сейчас "
+                "не нашлось.\n\n"
+                "Попробуй другую длину или стиль."
+            )
+
+        edit(
+            call,
             text,
-            reply_markup=after_search_menu()
+            after_search_menu()
         )
 
         return
@@ -947,37 +1120,38 @@ def callbacks(call):
     # SUBSCRIPTION
     # --------------------------------------------------------
 
-    if call.data == "subscription":
+    if data == "subscription":
 
         user = get_user(user_id)
 
-        bot.edit_message_text(
-            call.message.chat.id,
-            call.message.message_id,
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "💎 Купить за 50 ⭐",
+                    callback_data="buy_subscription"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "↩️ Назад",
+                    callback_data="back"
+                )
+            ]
+        ])
+
+        edit(
+            call,
             subscription_text(user),
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "💎 Купить за 50 ⭐",
-                        callback_data="buy_subscription"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        "↩️ Назад",
-                        callback_data="back"
-                    )
-                ]
-            ])
+            keyboard
         )
 
         return
 
     # --------------------------------------------------------
-    # BUY SUB
+    # BUY SUBSCRIPTION
     # --------------------------------------------------------
 
-    if call.data == "buy_subscription":
+    if data == "buy_subscription":
 
         send_subscription_invoice(
             call.message.chat.id
@@ -986,10 +1160,10 @@ def callbacks(call):
         return
 
     # --------------------------------------------------------
-    # BUY REQUEST
+    # BUY EXTRA
     # --------------------------------------------------------
 
-    if call.data == "buy_request":
+    if data == "buy_request":
 
         send_extra_invoice(
             call.message.chat.id
@@ -1001,17 +1175,14 @@ def callbacks(call):
     # STATS
     # --------------------------------------------------------
 
-    if call.data == "stats":
+    if data == "stats":
 
         user = get_user(user_id)
 
         if subscription_active(user):
-
-            sub_status = "💎 Активна"
-
+            sub = "💎 Активна"
         else:
-
-            sub_status = "⚪ Нет"
+            sub = "⚪ Нет"
 
         left = remaining_requests(user)
 
@@ -1023,21 +1194,13 @@ def callbacks(call):
             f"<b>{user.get('found_nicks', 0)}</b>\n"
             f"⚡ Доступно запросов: "
             f"<b>{left}</b>\n"
-            f"💎 Подписка: {sub_status}"
+            f"💎 Подписка: {sub}"
         )
 
-        bot.edit_message_text(
-            call.message.chat.id,
-            call.message.message_id,
+        edit(
+            call,
             text,
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "↩️ Назад",
-                        callback_data="back"
-                    )
-                ]
-            ])
+            back_menu()
         )
 
         return
@@ -1046,34 +1209,24 @@ def callbacks(call):
     # HOW
     # --------------------------------------------------------
 
-    if call.data == "how":
+    if data == "how":
 
         text = (
             "ℹ️ <b>Как работает UnixScan</b>\n\n"
-            "1️⃣ Ты выбираешь длину ника.\n\n"
+            "1️⃣ Выбираешь длину ника.\n\n"
             "2️⃣ Выбираешь стиль сочетания букв.\n\n"
-            "3️⃣ UnixScan генерирует десятки "
-            "вариантов.\n\n"
-            "4️⃣ Каждый вариант проверяется через "
-            "UnixGram.\n\n"
-            "5️⃣ Ты получаешь только свободные ники.\n\n"
-            "🎁 Бесплатно — 3 поиска в день.\n"
-            "💎 Premium — 10 поисков в день.\n"
-            "⭐ Можно докупать отдельные запросы."
+            "3️⃣ UnixScan генерирует варианты.\n\n"
+            "4️⃣ Проверяет их через UnixGram.\n\n"
+            "5️⃣ Показывает только свободные.\n\n"
+            "🎁 Бесплатно — <b>3 поиска в день</b>\n"
+            "💎 Premium — <b>10 поисков в день</b>\n"
+            "⭐ Дополнительный поиск — <b>10 Stars</b>"
         )
 
-        bot.edit_message_text(
-            call.message.chat.id,
-            call.message.message_id,
+        edit(
+            call,
             text,
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "↩️ Назад",
-                        callback_data="back"
-                    )
-                ]
-            ])
+            back_menu()
         )
 
         return
@@ -1082,67 +1235,72 @@ def callbacks(call):
     # ADMIN
     # --------------------------------------------------------
 
-    if call.data == "admin":
+    if data == "admin":
 
         if user_id != ADMIN_ID:
             return
 
-        result = (
+        users_result = (
             supabase
             .table("users")
             .select("*")
             .execute()
         )
 
-        users = result.data or []
+        users = users_result.data or []
 
-        total_users = len(users)
-
-        total_searches = sum(
-            int(x.get("total_searches", 0))
-            for x in users
-        )
-
-        total_found = sum(
-            int(x.get("found_nicks", 0))
-            for x in users
-        )
-
-        payments = (
+        payments_result = (
             supabase
             .table("payments")
             .select("*")
             .execute()
         )
 
-        payments_data = payments.data or []
+        payments = payments_result.data or []
 
-        stars = sum(
-            int(x.get("amount", 0))
-            for x in payments_data
+        total_searches = sum(
+            int(
+                user.get(
+                    "total_searches",
+                    0
+                )
+            )
+            for user in users
+        )
+
+        total_found = sum(
+            int(
+                user.get(
+                    "found_nicks",
+                    0
+                )
+            )
+            for user in users
+        )
+
+        total_stars = sum(
+            int(
+                payment.get(
+                    "amount",
+                    0
+                )
+            )
+            for payment in payments
         )
 
         text = (
             "🛠 <b>Админ-панель</b>\n\n"
-            f"👤 Пользователей: <b>{total_users}</b>\n"
+            f"👤 Пользователей: <b>{len(users)}</b>\n"
             f"🔎 Поисков: <b>{total_searches}</b>\n"
             f"💠 Найдено ников: <b>{total_found}</b>\n"
-            f"⭐ Получено Stars: <b>{stars}</b>\n"
-            f"💳 Платежей: <b>{len(payments_data)}</b>"
+            f"⭐ Получено Stars: <b>{total_stars}</b>\n"
+            f"💳 Платежей: <b>{len(payments)}</b>"
         )
 
-        bot.edit_message_text(
-            call.message.chat.id,
-            call.message.message_id,
+        edit(
+            call,
             text,
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "↩️ Назад",
-                        callback_data="back"
-                    )
-                ]
-            ])
+            back_menu()
         )
 
         return
@@ -1162,11 +1320,11 @@ def pre_checkout(query):
             ok=True
         )
 
-    except Exception as e:
+    except Exception as error:
 
         print(
-            "PRECHECKOUT ERROR:",
-            repr(e)
+            "PRE-CHECKOUT ERROR:",
+            repr(error)
         )
 
 
@@ -1185,15 +1343,16 @@ def successful_payment(message):
 
         payload = payment.invoice_payload
         amount = payment.total_amount
+
         user_id = message.from_user.id
 
         print(
-            f"PAYMENT: user={user_id}, "
-            f"amount={amount}, "
-            f"payload={payload}"
+            "PAYMENT:",
+            user_id,
+            amount,
+            payload
         )
 
-        # Защита от повторной обработки.
         if payment_exists(payload):
 
             print(
@@ -1217,34 +1376,37 @@ def successful_payment(message):
 
         if payload.startswith("sub:"):
 
-            current = datetime.now(KYIV)
+            current = now_kyiv()
 
-            until_raw = user.get(
+            old_until = user.get(
                 "subscription_until"
             )
 
-            if until_raw:
+            if old_until:
 
                 try:
 
-                    old_until = datetime.fromisoformat(
-                        until_raw.replace(
+                    old_dt = datetime.fromisoformat(
+                        old_until.replace(
                             "Z",
                             "+00:00"
                         )
                     )
 
-                    if old_until > current:
+                    if old_dt > datetime.now(
+                        old_dt.tzinfo
+                    ):
 
-                        current = old_until.astimezone(
+                        current = old_dt.astimezone(
                             KYIV
                         )
 
                 except Exception:
                     pass
 
-            until = current + timedelta(
-                days=SUB_DAYS
+            until = (
+                current
+                + timedelta(days=SUB_DAYS)
             )
 
             update_user(
@@ -1255,16 +1417,15 @@ def successful_payment(message):
                 }
             )
 
-            bot.send_message(
+            send(
                 message.chat.id,
                 (
                     "💎 <b>Подписка активирована!</b>\n\n"
                     "⭐ Оплата: <b>50 Stars</b>\n"
                     "🔎 Лимит: <b>10 поисков в день</b>\n"
-                    f"📅 До: <b>{until.date()}</b>\n\n"
-                    "Теперь можешь искать больше ников."
+                    f"📅 До: <b>{until.date()}</b>"
                 ),
-                reply_markup=main_menu(user_id)
+                main_menu(user_id)
             )
 
             return
@@ -1276,48 +1437,50 @@ def successful_payment(message):
         if payload.startswith("extra:"):
 
             extra = int(
-                user.get("extra_requests", 0)
+                user.get(
+                    "extra_requests",
+                    0
+                )
             )
 
             update_user(
                 user_id,
                 {
-                    "extra_requests": extra + 1
+                    "extra_requests":
+                        extra + 1
                 }
             )
 
-            bot.send_message(
+            send(
                 message.chat.id,
                 (
                     "⭐ <b>Запрос добавлен!</b>\n\n"
-                    "Тебе добавлен ещё <b>1 поиск</b>.\n\n"
-                    "Можешь использовать его прямо сейчас."
+                    "Тебе добавлен ещё "
+                    "<b>1 поиск</b>."
                 ),
-                reply_markup=main_menu(user_id)
+                main_menu(user_id)
             )
 
-            return
-
-    except Exception as e:
+    except Exception as error:
 
         print(
             "PAYMENT ERROR:",
-            repr(e)
+            repr(error)
         )
 
 
 # ============================================================
-# ERROR LOGGING
+# START BOT
 # ============================================================
 
 def start_bot():
 
-    print("===================================")
-    print("🔵 UnixScan starting...")
-    print("===================================")
+    print("==============================")
+    print("🔵 UnixScan started")
+    print("==============================")
 
     print(
-        "Admin:",
+        "Admin ID:",
         ADMIN_ID
     )
 
