@@ -175,6 +175,8 @@ def daily_limit_for(user: dict) -> int:
 
 
 def can_perform_search(user: dict):
+    if user.get("user_id") == ADMIN_ID:
+        return (True, "unlimited")
     user = _reset_if_new_day(user)
     limit = daily_limit_for(user)
     if user["requests_today"] < limit:
@@ -259,16 +261,23 @@ def get_user_stats(user_id: int) -> dict:
     if not rows:
         return {}
     user = _reset_if_new_day(rows[0])
-    limit = daily_limit_for(user)
+    is_admin = user_id == ADMIN_ID
+    limit = "∞" if is_admin else daily_limit_for(user)
+    remaining = (
+        "∞"
+        if is_admin
+        else max(0, daily_limit_for(user) - user.get("requests_today", 0))
+    )
     return {
         "requests_today": user.get("requests_today", 0),
         "daily_limit": limit,
-        "remaining_today": max(0, limit - user.get("requests_today", 0)),
+        "remaining_today": remaining,
         "extra_requests": user.get("extra_requests", 0),
         "total_searches": user.get("total_searches", 0),
         "found_nicks": user.get("found_nicks", 0),
         "is_subscribed": is_subscribed(user),
         "subscription_until": user.get("subscription_until"),
+        "is_admin": is_admin,
     }
 
 
@@ -343,24 +352,27 @@ def buy_menu() -> InlineKeyboardMarkup:
     return kb
 
 
-WELCOME_TEXT = "👋 <b>UnixScan</b>\n\nЯ нахожу свободные короткие юзернеймы на Unixgram.\nВыбери, что хочешь сделать:"
-HELP_TEXT = "ℹ️ <b>Как это работает</b>\n\n1. Жми «🔎 Найти ники» и выбирай длину ника (4–7 символов).\n2. Бот генерирует произносимые сочетания букв и сразу проверяет их через официальный API Unixgram.\n3. Как только наберётся 5 свободных ников — покажу список. Можно запросить ещё 5 кнопкой «🔁 Ещё 5».\n\n<b>Лимиты:</b>\n• Бесплатно — 3 поиска в день\n• Подписка (50 ⭐/мес) — 10 поисков в день\n• Разовая покупка (10 ⭐) — +1 поиск сверх дневного лимита\n\nСчётчик поисков сбрасывается каждый день по UTC."
+WELCOME_TEXT = "👋 UNIXCHECK\n\nЯ нахожу свободные короткие юзернеймы на Unixgram.\nВыбери, что хочешь сделать:"
+HELP_TEXT = "ℹ️ КАК ЭТО РАБОТАЕТ\n\n1. Жми «🔎 Найти ники» и выбирай длину ника (4–7 символов).\n2. Бот генерирует произносимые сочетания букв и сразу проверяет их через официальный API Unixgram.\n3. Как только наберётся 5 свободных ников — покажу список. Можно запросить ещё 5 кнопкой «🔁 Ещё 5».\n\nЛИМИТЫ:\n• Бесплатно — 3 поиска в день\n• Подписка (50 ⭐/мес) — 10 поисков в день\n• Разовая покупка (10 ⭐) — +1 поиск сверх дневного лимита\n\nСчётчик поисков сбрасывается каждый день по UTC."
 
 
 def format_stats_text(stats: dict) -> str:
     sub_line = "не активна"
     if stats.get("is_subscribed"):
-        sub_line = f"активна до <code>{stats.get('subscription_until')}</code>"
-    return f"📊 <b>Моя статистика</b>\n\nПоисков сегодня: <b>{stats['requests_today']}</b> / {stats['daily_limit']}\nОсталось сегодня: <b>{stats['remaining_today']}</b>\nДоп. запросов: <b>{stats['extra_requests']}</b>\nВсего поисков за всё время: <b>{stats['total_searches']}</b>\nВсего найдено ников: <b>{stats['found_nicks']}</b>\nПодписка: {sub_line}"
+        sub_line = f"активна до {stats.get('subscription_until')}"
+    admin_note = (
+        "\n👑 У тебя безлимитные поиски (админ)." if stats.get("is_admin") else ""
+    )
+    return f"📊 МОЯ СТАТИСТИКА\n\nПоисков сегодня: {stats['requests_today']} / {stats['daily_limit']}\nОсталось сегодня: {stats['remaining_today']}\nДоп. запросов: {stats['extra_requests']}\nВсего поисков за всё время: {stats['total_searches']}\nВсего найдено ников: {stats['found_nicks']}\nПодписка: {sub_line}{admin_note}"
 
 
 def format_admin_text(stats: dict) -> str:
     lines = [
-        "🛠 <b>Админ-панель</b>\n",
-        f"Пользователей: <b>{stats['user_count']}</b>",
-        f"Поисков: <b>{stats['search_count']}</b>",
-        f"Платежей: <b>{stats['payment_count']}</b>\n",
-        "<b>Последние 10 пользователей по активности:</b>",
+        "🛠 АДМИН-ПАНЕЛЬ\n",
+        f"Пользователей: {stats['user_count']}",
+        f"Поисков: {stats['search_count']}",
+        f"Платежей: {stats['payment_count']}\n",
+        "Последние 10 пользователей по активности:",
     ]
     for u in stats["recent_users"]:
         uname = u.get("username") or str(u.get("user_id"))
@@ -371,7 +383,7 @@ def format_admin_text(stats: dict) -> str:
 def format_results_text(length: int, found: list, attempts: int) -> str:
     if not found:
         return f"😕 За {attempts} попыток не удалось найти свободный ник длиной {length}.\nПопробуй ещё раз или выбери другую длину."
-    nick_lines = "\n".join((f"• <code>{n}</code>" for n in found))
+    nick_lines = "\n".join((f"• {n}" for n in found))
     return f"✅ Найдено свободных ников (длина {length}, проверено попыток: {attempts}):\n\n{nick_lines}"
 
 
@@ -393,10 +405,7 @@ def run_flask():
 def handle_start(message):
     get_or_create_user(message.chat.id, getattr(message.from_user, "username", None))
     bot.send_message(
-        message.chat.id,
-        WELCOME_TEXT,
-        parse_mode="HTML",
-        reply_markup=main_menu(message.chat.id),
+        message.chat.id, WELCOME_TEXT, reply_markup=main_menu(message.chat.id)
     )
 
 
@@ -442,7 +451,7 @@ def _run_search(chat_id: int, length: int, message_id: int = None):
         if message_id:
             bot.edit_message_text(text, chat_id, message_id, reply_markup=markup)
         else:
-            bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=markup)
+            bot.send_message(chat_id, text, reply_markup=markup)
         return
     session = search_sessions.setdefault(chat_id, {"length": length, "tried": set()})
     if session.get("length") != length:
@@ -468,7 +477,7 @@ def _run_search(chat_id: int, length: int, message_id: int = None):
     if message_id:
         bot.edit_message_text(text, chat_id, message_id, reply_markup=markup)
     else:
-        bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=markup)
+        bot.send_message(chat_id, text, reply_markup=markup)
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("search:len:"))
@@ -504,7 +513,7 @@ def cb_stats(call):
 def cb_buy_menu(call):
     bot.answer_callback_query(call.id)
     bot.edit_message_text(
-        f"💎 <b>Подписка и доп. запросы</b>\n\n• Подписка на {SUB_DURATION_DAYS} дней — {SUB_PRICE_STARS} ⭐ (10 поисков/день)\n• Разовый доп. запрос — {EXTRA_PRICE_STARS} ⭐ (+1 поиск сверх лимита)",
+        f"💎 ПОДПИСКА И ДОП. ЗАПРОСЫ\n\n• Подписка на {SUB_DURATION_DAYS} дней — {SUB_PRICE_STARS} ⭐ (10 поисков/день)\n• Разовый доп. запрос — {EXTRA_PRICE_STARS} ⭐ (+1 поиск сверх лимита)",
         call.message.chat.id,
         call.message.message_id,
         reply_markup=buy_menu(),
@@ -516,7 +525,7 @@ def cb_buy_sub(call):
     bot.answer_callback_query(call.id)
     bot.send_invoice(
         call.message.chat.id,
-        title="Подписка UnixScan",
+        title="Подписка UnixCheck",
         description="30 дней повышенного лимита поисков (10 в день).",
         payload=PAYLOAD_SUBSCRIPTION,
         amount_stars=SUB_PRICE_STARS,
@@ -528,7 +537,7 @@ def cb_buy_extra(call):
     bot.answer_callback_query(call.id)
     bot.send_invoice(
         call.message.chat.id,
-        title="Доп. запрос UnixScan",
+        title="Доп. запрос UnixCheck",
         description="+1 поиск сверх дневного лимита.",
         payload=PAYLOAD_EXTRA_REQUEST,
         amount_stars=EXTRA_PRICE_STARS,
@@ -550,7 +559,7 @@ def handle_pre_checkout(query):
         text = "✅ Доп. запрос добавлен! Можно использовать сверх дневного лимита."
     else:
         text = "✅ Оплата получена."
-    bot.send_message(user_id, text, parse_mode="HTML", reply_markup=main_menu(user_id))
+    bot.send_message(user_id, text, reply_markup=main_menu(user_id))
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "menu:admin")
@@ -570,5 +579,5 @@ def cb_admin(call):
 if __name__ == "__main__":
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    print("UnixScan bot started (polling)...")
+    print("UnixCheck bot started (polling)...")
     bot.polling(none_stop=True)
