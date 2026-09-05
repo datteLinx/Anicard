@@ -1,151 +1,214 @@
 from unixgram import Bot, InlineKeyboardMarkup, InlineKeyboardButton
-import sqlite3
+from unixgram.api import InputFile
+from supabase import create_client
+from dotenv import load_dotenv
+
+import os
 import random
 import time
+import io
+import tempfile
+import urllib.request
+import urllib.error
 
 # ============================================================
 # CONFIG
 # ============================================================
 
-TOKEN = "3116357841:9twhoSbV5tqEmHgp5zmc4LgqmsDeTnJJ"
+load_dotenv()
 
-# ID администраторов Anicards
-ADMINS = {
-    123456789,
-}
+TOKEN = os.getenv("UNIXGRAM_TOKEN")
 
-# Сколько раз в сутки можно открыть карточку
-DAILY_DROPS = 3
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-# Редкости
+if not TOKEN:
+    raise RuntimeError("UNIXGRAM_TOKEN не задан")
+
+if not SUPABASE_URL:
+    raise RuntimeError("SUPABASE_URL не задан")
+
+if not SUPABASE_KEY:
+    raise RuntimeError("SUPABASE_KEY не задан")
+
+
+bot = Bot(TOKEN)
+
+supabase = create_client(
+    SUPABASE_URL,
+    SUPABASE_KEY
+)
+
+
+ADMINS = {169}
+
+pending_cards = {}
+
+DROP_COOLDOWN = 6 * 60 * 60
+
+
+# ============================================================
+# RARITIES
+# ============================================================
+
 RARITIES = {
     "common": {
         "name": "Обычная",
         "chance": 55,
         "points": 10,
-        "xp": 10,
+        "xp": 10
     },
+
     "rare": {
         "name": "Редкая",
         "chance": 25,
         "points": 25,
-        "xp": 25,
+        "xp": 25
     },
+
     "epic": {
         "name": "Эпическая",
         "chance": 13,
         "points": 50,
-        "xp": 50,
+        "xp": 50
     },
+
     "legendary": {
         "name": "Легендарная",
         "chance": 5,
         "points": 100,
-        "xp": 100,
+        "xp": 100
     },
+
     "mythic": {
         "name": "Мифическая",
         "chance": 2,
         "points": 250,
-        "xp": 250,
-    },
+        "xp": 250
+    }
 }
 
-# ============================================================
-# DATABASE
-# ============================================================
-
-db = sqlite3.connect("anicards.db", check_same_thread=False)
-db.row_factory = sqlite3.Row
-
-
-def init_db():
-    db.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT DEFAULT '',
-            first_name TEXT DEFAULT '',
-            xp INTEGER DEFAULT 0,
-            points INTEGER DEFAULT 0,
-            cards_opened INTEGER DEFAULT 0,
-            last_drop INTEGER DEFAULT 0
-        )
-    """)
-
-    db.execute("""
-        CREATE TABLE IF NOT EXISTS cards (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            anime TEXT NOT NULL,
-            rarity TEXT NOT NULL,
-            points INTEGER NOT NULL,
-            image_url TEXT NOT NULL
-        )
-    """)
-
-    db.execute("""
-        CREATE TABLE IF NOT EXISTS inventory (
-            user_id INTEGER NOT NULL,
-            card_id INTEGER NOT NULL,
-            amount INTEGER DEFAULT 1,
-            PRIMARY KEY (user_id, card_id)
-        )
-    """)
-
-    db.commit()
-
-
-init_db()
-
 
 # ============================================================
-# USERS
+# HELPERS
 # ============================================================
+
+def is_admin(user_id):
+    return user_id in ADMINS
+
 
 def ensure_user(message):
     user_id = message.from_user.id
 
-    username = getattr(message.from_user, "username", "") or ""
-    first_name = getattr(message.from_user, "first_name", "") or ""
+    username = getattr(
+        message.from_user,
+        "username",
+        ""
+    ) or ""
 
-    db.execute("""
-        INSERT INTO users (user_id, username, first_name)
-        VALUES (?, ?, ?)
-        ON CONFLICT(user_id) DO UPDATE SET
-            username = excluded.username,
-            first_name = excluded.first_name
-    """, (user_id, username, first_name))
+    first_name = getattr(
+        message.from_user,
+        "first_name",
+        ""
+    ) or ""
 
-    db.commit()
+    result = (
+        supabase
+        .table("users")
+        .upsert({
+            "user_id": user_id,
+            "username": username,
+            "first_name": first_name
+        })
+        .execute()
+    )
 
     return user_id
 
 
+def ensure_user_id(user_id):
+    existing = (
+        supabase
+        .table("users")
+        .select("user_id")
+        .eq("user_id", user_id)
+        .execute()
+    )
+
+    if not existing.data:
+        (
+            supabase
+            .table("users")
+            .insert({
+                "user_id": user_id,
+                "username": "",
+                "first_name": "",
+                "xp": 0,
+                "points": 0,
+                "cards_opened": 0,
+                "last_drop": 0
+            })
+            .execute()
+        )
+
+
 def get_user(user_id):
-    return db.execute(
-        "SELECT * FROM users WHERE user_id = ?",
-        (user_id,)
-    ).fetchone()
+    result = (
+        supabase
+        .table("users")
+        .select("*")
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
+    )
+
+    if not result.data:
+        return None
+
+    return result.data[0]
 
 
 def add_xp(user_id, amount):
-    db.execute(
-        "UPDATE users SET xp = xp + ? WHERE user_id = ?",
-        (amount, user_id)
+    user = get_user(user_id)
+
+    if not user:
+        ensure_user_id(user_id)
+        user = get_user(user_id)
+
+    new_xp = user["xp"] + amount
+
+    (
+        supabase
+        .table("users")
+        .update({
+            "xp": new_xp
+        })
+        .eq("user_id", user_id)
+        .execute()
     )
-    db.commit()
 
 
 def add_points(user_id, amount):
-    db.execute(
-        "UPDATE users SET points = points + ? WHERE user_id = ?",
-        (amount, user_id)
+    user = get_user(user_id)
+
+    if not user:
+        ensure_user_id(user_id)
+        user = get_user(user_id)
+
+    new_points = user["points"] + amount
+
+    (
+        supabase
+        .table("users")
+        .update({
+            "points": new_points
+        })
+        .eq("user_id", user_id)
+        .execute()
     )
-    db.commit()
 
 
 def get_level(xp):
-    # Каждые 100 XP = новый уровень
     return xp // 100 + 1
 
 
@@ -154,40 +217,60 @@ def get_level(xp):
 # ============================================================
 
 def add_card_to_inventory(user_id, card_id):
-    existing = db.execute("""
-        SELECT amount
-        FROM inventory
-        WHERE user_id = ? AND card_id = ?
-    """, (user_id, card_id)).fetchone()
 
-    if existing:
-        db.execute("""
-            UPDATE inventory
-            SET amount = amount + 1
-            WHERE user_id = ? AND card_id = ?
-        """, (user_id, card_id))
-        duplicate = True
-    else:
-        db.execute("""
-            INSERT INTO inventory (user_id, card_id, amount)
-            VALUES (?, ?, 1)
-        """, (user_id, card_id))
-        duplicate = False
+    result = (
+        supabase
+        .table("inventory")
+        .select("amount")
+        .eq("user_id", user_id)
+        .eq("card_id", card_id)
+        .limit(1)
+        .execute()
+    )
 
-    db.commit()
-    return duplicate
+    if result.data:
+
+        amount = result.data[0]["amount"]
+
+        (
+            supabase
+            .table("inventory")
+            .update({
+                "amount": amount + 1
+            })
+            .eq("user_id", user_id)
+            .eq("card_id", card_id)
+            .execute()
+        )
+
+        return True
+
+    (
+        supabase
+        .table("inventory")
+        .insert({
+            "user_id": user_id,
+            "card_id": card_id,
+            "amount": 1
+        })
+        .execute()
+    )
+
+    return False
 
 
 # ============================================================
-# RARITY
+# CARDS
 # ============================================================
 
 def random_rarity():
+
     value = random.uniform(0, 100)
 
     current = 0
 
     for rarity, data in RARITIES.items():
+
         current += data["chance"]
 
         if value <= current:
@@ -196,26 +279,30 @@ def random_rarity():
     return "common"
 
 
-# ============================================================
-# CARDS
-# ============================================================
-
 def get_random_card():
+
     rarity = random_rarity()
 
-    cards = db.execute("""
-        SELECT *
-        FROM cards
-        WHERE rarity = ?
-    """, (rarity,)).fetchall()
+    result = (
+        supabase
+        .table("cards")
+        .select("*")
+        .eq("rarity", rarity)
+        .execute()
+    )
 
-    # Если карточек такой редкости ещё нет,
-    # берём любую существующую
+    cards = result.data
+
     if not cards:
-        cards = db.execute("""
-            SELECT *
-            FROM cards
-        """).fetchall()
+
+        result = (
+            supabase
+            .table("cards")
+            .select("*")
+            .execute()
+        )
+
+        cards = result.data
 
     if not cards:
         return None
@@ -224,84 +311,560 @@ def get_random_card():
 
 
 def get_card(card_id):
-    return db.execute(
-        "SELECT * FROM cards WHERE id = ?",
-        (card_id,)
-    ).fetchone()
+
+    result = (
+        supabase
+        .table("cards")
+        .select("*")
+        .eq("id", card_id)
+        .limit(1)
+        .execute()
+    )
+
+    if not result.data:
+        return None
+
+    return result.data[0]
 
 
 # ============================================================
-# LIMIT
+# COOLDOWN
 # ============================================================
 
 def can_open(user):
+
     now = int(time.time())
 
-    if now - user["last_drop"] >= 86400:
-        return True
+    last_drop = user["last_drop"] or 0
 
-    return user["cards_opened"] < DAILY_DROPS
+    return now - last_drop >= DROP_COOLDOWN
+
+
+def get_remaining_cooldown(user):
+
+    now = int(time.time())
+
+    last_drop = user["last_drop"] or 0
+
+    remaining = DROP_COOLDOWN - (now - last_drop)
+
+    if remaining < 0:
+        remaining = 0
+
+    return remaining
+
+
+def format_time(seconds):
+
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    secs = seconds % 60
+
+    if hours > 0:
+        return f"{hours}ч {minutes}м"
+
+    if minutes > 0:
+        return f"{minutes}м {secs}с"
+
+    return f"{secs}с"
 
 
 def register_drop(user_id):
+
     now = int(time.time())
-    user = get_user(user_id)
 
-    if now - user["last_drop"] >= 86400:
-        db.execute("""
-            UPDATE users
-            SET cards_opened = 1,
-                last_drop = ?
-            WHERE user_id = ?
-        """, (now, user_id))
-    else:
-        db.execute("""
-            UPDATE users
-            SET cards_opened = cards_opened + 1
-            WHERE user_id = ?
-        """, (user_id,))
-
-    db.commit()
+    (
+        supabase
+        .table("users")
+        .update({
+            "last_drop": now
+        })
+        .eq("user_id", user_id)
+        .execute()
+    )
 
 
 # ============================================================
-# KEYBOARDS
+# STORAGE
+# ============================================================
+
+STORAGE_BUCKET = "anicards"
+
+
+def upload_image(file_bytes, card_id):
+
+    path = f"cards/{card_id}.jpg"
+
+    (
+        supabase
+        .storage
+        .from_(STORAGE_BUCKET)
+        .upload(
+            path,
+            file_bytes,
+            {
+                "content-type": "image/jpeg",
+                "cache-control": "31536000",
+                "upsert": "true"
+            }
+        )
+    )
+
+    return path
+
+
+def get_image_url(path):
+
+    result = (
+        supabase
+        .storage
+        .from_(STORAGE_BUCKET)
+        .get_public_url(path)
+    )
+
+    return result
+
+
+def download_image(path):
+
+    data = (
+        supabase
+        .storage
+        .from_(STORAGE_BUCKET)
+        .download(path)
+    )
+
+    return data
+
+
+# ============================================================
+# PHOTO DOWNLOAD FROM UNIXGRAM
+# ============================================================
+
+def get_photo_bytes(message):
+    if not message.photo:
+        return None
+
+    photo = message.photo[-1]
+
+    if isinstance(photo, dict):
+        file_id = photo.get("file_id")
+    else:
+        file_id = getattr(photo, "file_id", None)
+
+    if not file_id:
+        print("PHOTO ERROR: file_id не найден")
+        print("PHOTO OBJECT:", repr(photo))
+        return None
+
+    print("PHOTO FILE ID:", file_id)
+
+    # file_id в unixgram-py — это уже готовый URL на media.unixgram.com,
+    # отдельного get_file/download_file в библиотеке нет
+    try:
+        req = urllib.request.Request(
+            file_id,
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = resp.read()
+
+        print("PHOTO DOWNLOADED:", len(data), "bytes")
+        return data
+
+    except urllib.error.URLError as e:
+        print("DOWNLOAD ERROR:", repr(e))
+        return None
+
+# ============================================================
+# KEYBOARD
 # ============================================================
 
 def main_keyboard():
+
     kb = InlineKeyboardMarkup()
 
     kb.row(
-        InlineKeyboardButton("🎴 Карточка", callback_data="open_card"),
-        InlineKeyboardButton("🎒 Инвентарь", callback_data="inventory")
+        InlineKeyboardButton(
+            "🎴 Карточка",
+            callback_data="open_card"
+        ),
+        InlineKeyboardButton(
+            "🎒 Инвентарь",
+            callback_data="inventory"
+        )
     )
 
     kb.row(
-        InlineKeyboardButton("👤 Профиль", callback_data="profile"),
-        InlineKeyboardButton("🏆 Топ", callback_data="top")
+        InlineKeyboardButton(
+            "👤 Профиль",
+            callback_data="profile"
+        ),
+        InlineKeyboardButton(
+            "🏆 Топ",
+            callback_data="top"
+        )
     )
 
     return kb
 
 
 # ============================================================
+# OPEN CARD
+# ============================================================
+
+def open_random_card(chat_id, user_id):
+
+    user = get_user(user_id)
+
+    if not user:
+        return
+
+    if not can_open(user):
+
+        remaining = get_remaining_cooldown(user)
+
+        bot.send_message(
+            chat_id,
+            "⏳ Карточку пока нельзя открыть.\n\n"
+            f"Следующая будет доступна через {format_time(remaining)}."
+        )
+
+        return
+
+    card = get_random_card()
+
+    if not card:
+
+        bot.send_message(
+            chat_id,
+            "❌ В базе пока нет карточек."
+        )
+
+        return
+
+    register_drop(user_id)
+
+    rarity = RARITIES.get(
+        card["rarity"],
+        RARITIES["common"]
+    )
+
+    duplicate = add_card_to_inventory(
+        user_id,
+        card["id"]
+    )
+
+    add_xp(
+        user_id,
+        rarity["xp"]
+    )
+
+    add_points(
+        user_id,
+        rarity["points"]
+    )
+
+    if duplicate:
+
+        text = (
+            "🔁 Дубликат\n\n"
+            f"🎴 {card['name']}\n"
+            f"📺 {card['anime']}\n"
+            f"💎 {rarity['name']}\n\n"
+            f"⭐ +{rarity['points']} очков\n"
+            f"✨ +{rarity['xp']} XP"
+        )
+
+    else:
+
+        text = (
+            "🎴 Новая карточка\n\n"
+            f"👤 {card['name']}\n"
+            f"📺 {card['anime']}\n"
+            f"💎 {rarity['name']}\n\n"
+            f"⭐ +{rarity['points']} очков\n"
+            f"✨ +{rarity['xp']} XP"
+        )
+
+        image_path = card["image_path"]
+
+    try:
+
+        image_data = download_image(
+            image_path
+        )
+
+        photo = InputFile(
+            image_data,
+            name="card.jpg",
+            content_type="image/jpeg"
+        )
+
+        bot.send_photo(
+            chat_id,
+            photo
+        )
+
+        bot.send_message(
+            chat_id,
+            text
+        )
+
+    except Exception as e:
+
+        print(
+            "IMAGE ERROR:",
+            repr(e)
+        )
+
+        bot.send_message(
+            chat_id,
+            text
+        )
+# ============================================================
+# CALLBACK — CARD
+# ============================================================
+
+@bot.callback_query_handler(
+    func=lambda q: q.data == "open_card"
+)
+def callback_open_card(query):
+
+    bot.answer_callback_query(
+        query.id
+    )
+
+    user_id = query.from_user.id
+
+    user = get_user(
+        user_id
+    )
+
+    if not user:
+
+        bot.send_message(
+            query.message.chat.id,
+            "Сначала используй /start."
+        )
+
+        return
+
+    open_random_card(
+        query.message.chat.id,
+        user_id
+    )
+
+
+# ============================================================
+# CALLBACK — INVENTORY
+# ============================================================
+
+@bot.callback_query_handler(
+    func=lambda q: q.data == "inventory"
+)
+def callback_inventory(query):
+
+    bot.answer_callback_query(
+        query.id
+    )
+
+    user_id = query.from_user.id
+
+    result = (
+        supabase
+        .table("inventory")
+        .select(
+            "card_id, amount, cards(name, anime, rarity)"
+        )
+        .eq("user_id", user_id)
+        .order("card_id")
+        .execute()
+    )
+
+    rows = result.data
+
+    if not rows:
+
+        bot.send_message(
+            query.message.chat.id,
+            "🎒 Инвентарь пуст."
+        )
+
+        return
+
+    lines = [
+        "🎒 ТВОЯ КОЛЛЕКЦИЯ",
+        ""
+    ]
+
+    for row in rows:
+
+        card = row.get("cards")
+
+        if not card:
+            continue
+
+        rarity = RARITIES.get(
+            card["rarity"],
+            RARITIES["common"]
+        )
+
+        lines.append(
+            f"🎴 {card['name']}\n"
+            f"   📺 {card['anime']}\n"
+            f"   💎 {rarity['name']} · x{row['amount']}"
+        )
+
+    bot.send_message(
+        query.message.chat.id,
+        "\n".join(lines)
+    )
+
+
+# ============================================================
+# CALLBACK — PROFILE
+# ============================================================
+
+@bot.callback_query_handler(
+    func=lambda q: q.data == "profile"
+)
+def callback_profile(query):
+
+    bot.answer_callback_query(
+        query.id
+    )
+
+    user = get_user(
+        query.from_user.id
+    )
+
+    if not user:
+
+        bot.send_message(
+            query.message.chat.id,
+            "Сначала используй /start."
+        )
+
+        return
+
+    inventory_result = (
+        supabase
+        .table("inventory")
+        .select("amount")
+        .eq(
+            "user_id",
+            query.from_user.id
+        )
+        .execute()
+    )
+
+    cards_count = sum(
+        row["amount"]
+        for row in inventory_result.data
+    )
+
+    unique_count = len(
+        inventory_result.data
+    )
+
+    name = (
+        user["first_name"]
+        or user["username"]
+        or str(user["user_id"])
+    )
+
+    bot.send_message(
+        query.message.chat.id,
+        "👤 ПРОФИЛЬ\n\n"
+        f"👤 {name}\n"
+        f"⭐ Очки: {user['points']}\n"
+        f"✨ XP: {user['xp']}\n"
+        f"🏅 Уровень: {get_level(user['xp'])}\n"
+        f"🎴 Карточек: {cards_count}\n"
+        f"📚 Уникальных: {unique_count}"
+    )
+
+
+# ============================================================
+# CALLBACK — TOP
+# ============================================================
+
+@bot.callback_query_handler(
+    func=lambda q: q.data == "top"
+)
+def callback_top(query):
+
+    bot.answer_callback_query(
+        query.id
+    )
+
+    result = (
+        supabase
+        .table("users")
+        .select("*")
+        .order(
+            "points",
+            desc=True
+        )
+        .limit(10)
+        .execute()
+    )
+
+    users = result.data
+
+    if not users:
+
+        bot.send_message(
+            query.message.chat.id,
+            "🏆 Пока никто не набрал очков."
+        )
+
+        return
+
+    lines = [
+        "🏆 ТОП ANICARDS",
+        ""
+    ]
+
+    for i, user in enumerate(users):
+
+        name = (
+            user["first_name"]
+            or user["username"]
+            or str(user["user_id"])
+        )
+
+        lines.append(
+            f"{i + 1}. {name} — "
+            f"{user['points']} ⭐"
+        )
+
+    bot.send_message(
+        query.message.chat.id,
+        "\n".join(lines)
+    )
+
+
+# ============================================================
 # START
 # ============================================================
 
-@bot.message_handler(commands=["start"])
+@bot.message_handler(
+    commands=["start"]
+)
 def start(message):
-    user_id = ensure_user(message)
+
+    ensure_user(message)
 
     bot.send_message(
         message.chat.id,
-        "🎴 <b>Anicards</b>\n\n"
+        "🎴 ANICARDS\n\n"
         "Коллекционируй карточки аниме-персонажей.\n\n"
-        "🎴 Открывай карточки\n"
-        "🎒 Собирай коллекцию\n"
-        "⭐ Получай XP и очки\n"
-        "🏆 Попадай в таблицу лидеров\n\n"
+        "Открывай карточки и собирай коллекцию.\n"
+        "За карточки получаешь XP и очки.\n\n"
         "Нажми кнопку ниже.",
-        parse_mode="HTML",
         reply_markup=main_keyboard()
     )
 
@@ -310,205 +873,210 @@ def start(message):
 # HELP
 # ============================================================
 
-@bot.message_handler(commands=["help"])
+@bot.message_handler(
+    commands=["help"]
+)
 def help_command(message):
+
     ensure_user(message)
 
     bot.send_message(
         message.chat.id,
-        "🎴 <b>Anicards</b>\n\n"
+        "🎴 ANICARDS\n\n"
         "/card — открыть карточку\n"
-        "/inventory — твоя коллекция\n"
-        "/profile — твой профиль\n"
+        "/inventory — коллекция\n"
+        "/profile — профиль\n"
         "/top — таблица лидеров\n"
-        "/help — помощь",
-        parse_mode="HTML"
+        "/id — узнать свой ID\n"
+        "/help — помощь"
     )
 
 
 # ============================================================
-# OPEN CARD
+# CARD COMMAND
 # ============================================================
 
-@bot.message_handler(commands=["card"])
-def open_card(message):
-    user_id = ensure_user(message)
-    user = get_user(user_id)
+@bot.message_handler(
+    commands=["card"]
+)
+def card_command(message):
 
-    if not can_open(user):
-        bot.send_message(
-            message.chat.id,
-            "⏳ Ты уже открыл все карточки на сегодня.\n"
-            "Попробуй завтра."
-        )
-        return
-
-    card = get_random_card()
-
-    if not card:
-        bot.send_message(
-            message.chat.id,
-            "❌ В базе пока нет карточек."
-        )
-        return
-
-    register_drop(user_id)
-
-    rarity = RARITIES[card["rarity"]]
-
-    duplicate = add_card_to_inventory(
-        user_id,
-        card["id"]
+    user_id = ensure_user(
+        message
     )
 
-    add_xp(user_id, rarity["xp"])
-    add_points(user_id, rarity["points"])
-
-    if duplicate:
-        text = (
-            "🔁 <b>Дубликат!</b>\n\n"
-            f"🎴 <b>{card['name']}</b>\n"
-            f"📺 {card['anime']}\n"
-            f"💎 {rarity['name']}\n\n"
-            f"⭐ +{rarity['points']} очков\n"
-            f"✨ +{rarity['xp']} XP"
-        )
-    else:
-        text = (
-            "🎴 <b>НОВАЯ КАРТОЧКА!</b>\n\n"
-            f"👤 <b>{card['name']}</b>\n"
-            f"📺 {card['anime']}\n"
-            f"💎 Редкость: <b>{rarity['name']}</b>\n"
-            f"⭐ Очки: <b>{rarity['points']}</b>\n"
-            f"✨ XP: <b>+{rarity['xp']}</b>"
-        )
-
-    bot.send_photo(
+    open_random_card(
         message.chat.id,
-        card["image_url"],
-        caption=text,
-        parse_mode="HTML"
+        user_id
     )
 
 
 # ============================================================
-# INVENTORY
+# INVENTORY COMMAND
 # ============================================================
 
-@bot.message_handler(commands=["inventory"])
+@bot.message_handler(
+    commands=["inventory"]
+)
 def inventory(message):
-    user_id = ensure_user(message)
 
-    rows = db.execute("""
-        SELECT
-            cards.id,
-            cards.name,
-            cards.anime,
-            cards.rarity,
-            cards.points,
-            inventory.amount
-        FROM inventory
-        JOIN cards ON cards.id = inventory.card_id
-        WHERE inventory.user_id = ?
-        ORDER BY cards.rarity DESC, cards.id
-    """, (user_id,)).fetchall()
+    user_id = ensure_user(
+        message
+    )
+
+    result = (
+        supabase
+        .table("inventory")
+        .select(
+            "card_id, amount, cards(name, anime, rarity)"
+        )
+        .eq(
+            "user_id",
+            user_id
+        )
+        .order("card_id")
+        .execute()
+    )
+
+    rows = result.data
 
     if not rows:
+
         bot.send_message(
             message.chat.id,
-            "🎒 <b>Инвентарь пуст.</b>\n\n"
-            "Открой первую карточку через /card",
-            parse_mode="HTML"
+            "🎒 Инвентарь пуст.\n\n"
+            "Открой первую карточку через /card"
         )
+
         return
 
     lines = [
-        "🎒 <b>ТВОЯ КОЛЛЕКЦИЯ</b>",
+        "🎒 ТВОЯ КОЛЛЕКЦИЯ",
         ""
     ]
 
-    for card in rows:
-        rarity = RARITIES[card["rarity"]]
+    for row in rows:
+
+        card = row.get("cards")
+
+        if not card:
+            continue
+
+        rarity = RARITIES.get(
+            card["rarity"],
+            RARITIES["common"]
+        )
 
         lines.append(
-            f"#{card['id']} — <b>{card['name']}</b>\n"
+            f"#{row['card_id']} — {card['name']}\n"
             f"   📺 {card['anime']} · "
-            f"{rarity['name']} · x{card['amount']}"
+            f"{rarity['name']} · "
+            f"x{row['amount']}"
         )
 
     bot.send_message(
         message.chat.id,
-        "\n".join(lines),
-        parse_mode="HTML"
+        "\n".join(lines)
     )
 
 
 # ============================================================
-# PROFILE
+# PROFILE COMMAND
 # ============================================================
 
-@bot.message_handler(commands=["profile"])
+@bot.message_handler(
+    commands=["profile"]
+)
 def profile(message):
-    user_id = ensure_user(message)
-    user = get_user(user_id)
 
-    level = get_level(user["xp"])
+    user_id = ensure_user(
+        message
+    )
 
-    cards_count = db.execute("""
-        SELECT COALESCE(SUM(amount), 0)
-        FROM inventory
-        WHERE user_id = ?
-    """, (user_id,)).fetchone()[0]
+    user = get_user(
+        user_id
+    )
 
-    unique_count = db.execute("""
-        SELECT COUNT(*)
-        FROM inventory
-        WHERE user_id = ?
-    """, (user_id,)).fetchone()[0]
+    inventory_result = (
+        supabase
+        .table("inventory")
+        .select("amount")
+        .eq(
+            "user_id",
+            user_id
+        )
+        .execute()
+    )
 
-    name = user["first_name"] or user["username"] or str(user_id)
+    cards_count = sum(
+        row["amount"]
+        for row in inventory_result.data
+    )
+
+    unique_count = len(
+        inventory_result.data
+    )
+
+    name = (
+        user["first_name"]
+        or user["username"]
+        or str(user_id)
+    )
 
     bot.send_message(
         message.chat.id,
-        "👤 <b>ПРОФИЛЬ</b>\n\n"
+        "👤 ПРОФИЛЬ\n\n"
         f"👤 {name}\n"
-        f"⭐ Очки: <b>{user['points']}</b>\n"
-        f"✨ XP: <b>{user['xp']}</b>\n"
-        f"🏅 Уровень: <b>{level}</b>\n"
-        f"🎴 Карточек: <b>{cards_count}</b>\n"
-        f"📚 Уникальных: <b>{unique_count}</b>",
-        parse_mode="HTML"
+        f"⭐ Очки: {user['points']}\n"
+        f"✨ XP: {user['xp']}\n"
+        f"🏅 Уровень: {get_level(user['xp'])}\n"
+        f"🎴 Карточек: {cards_count}\n"
+        f"📚 Уникальных: {unique_count}"
     )
 
 
 # ============================================================
-# LEADERBOARD
+# TOP COMMAND
 # ============================================================
 
-@bot.message_handler(commands=["top"])
+@bot.message_handler(
+    commands=["top"]
+)
 def top(message):
-    ensure_user(message)
 
-    users = db.execute("""
-        SELECT *
-        FROM users
-        ORDER BY points DESC
-        LIMIT 10
-    """).fetchall()
+    ensure_user(
+        message
+    )
+
+    result = (
+        supabase
+        .table("users")
+        .select("*")
+        .order(
+            "points",
+            desc=True
+        )
+        .limit(10)
+        .execute()
+    )
+
+    users = result.data
 
     if not users:
+
         bot.send_message(
             message.chat.id,
             "🏆 Пока никто не набрал очков."
         )
+
         return
 
-    lines = ["🏆 <b>ТОП ANICARDS</b>", ""]
+    lines = [
+        "🏆 ТОП ANICARDS",
+        ""
+    ]
 
-    medals = ["🥇", "🥈", "🥉"]
-
-    for index, user in enumerate(users):
-        medal = medals[index] if index < 3 else f"{index + 1}."
+    for i, user in enumerate(users):
 
         name = (
             user["first_name"]
@@ -517,320 +1085,414 @@ def top(message):
         )
 
         lines.append(
-            f"{medal} <b>{name}</b> — "
+            f"{i + 1}. {name} — "
             f"{user['points']} ⭐"
         )
 
     bot.send_message(
         message.chat.id,
-        "\n".join(lines),
-        parse_mode="HTML"
+        "\n".join(lines)
     )
 
 
 # ============================================================
-# CALLBACKS
+# ID
 # ============================================================
 
-@bot.callback_query_handler(
-    func=lambda q: q.data == "open_card"
+@bot.message_handler(
+    commands=["id"]
 )
-def callback_open_card(query):
-    bot.answer_callback_query(query.id)
-
-    # Создаём объект, похожий на обычный message,
-    # поэтому здесь проще просто отправить подсказку.
-    bot.send_message(
-        query.message.chat.id,
-        "🎴 Используй /card"
-    )
-
-
-@bot.callback_query_handler(
-    func=lambda q: q.data == "inventory"
-)
-def callback_inventory(query):
-    bot.answer_callback_query(query.id)
-
-    user_id = query.from_user.id
-
-    rows = db.execute("""
-        SELECT
-            cards.name,
-            cards.anime,
-            cards.rarity,
-            inventory.amount
-        FROM inventory
-        JOIN cards ON cards.id = inventory.card_id
-        WHERE inventory.user_id = ?
-    """, (user_id,)).fetchall()
-
-    if not rows:
-        bot.send_message(
-            query.message.chat.id,
-            "🎒 Инвентарь пуст."
-        )
-        return
-
-    text = "🎒 <b>ИНВЕНТАРЬ</b>\n\n"
-
-    for card in rows:
-        text += (
-            f"🎴 {card['name']} — "
-            f"{RARITIES[card['rarity']]['name']} "
-            f"x{card['amount']}\n"
-        )
+def get_id(message):
 
     bot.send_message(
-        query.message.chat.id,
-        text,
-        parse_mode="HTML"
-    )
-
-
-@bot.callback_query_handler(
-    func=lambda q: q.data == "profile"
-)
-def callback_profile(query):
-    bot.answer_callback_query(query.id)
-
-    user = get_user(query.from_user.id)
-
-    if not user:
-        bot.send_message(
-            query.message.chat.id,
-            "Используй /start"
-        )
-        return
-
-    bot.send_message(
-        query.message.chat.id,
-        f"👤 <b>Профиль</b>\n\n"
-        f"⭐ Очки: {user['points']}\n"
-        f"✨ XP: {user['xp']}\n"
-        f"🏅 Уровень: {get_level(user['xp'])}",
-        parse_mode="HTML"
-    )
-
-
-@bot.callback_query_handler(
-    func=lambda q: q.data == "top"
-)
-def callback_top(query):
-    bot.answer_callback_query(query.id)
-
-    users = db.execute("""
-        SELECT *
-        FROM users
-        ORDER BY points DESC
-        LIMIT 10
-    """).fetchall()
-
-    text = "🏆 <b>ТОП</b>\n\n"
-
-    for i, user in enumerate(users):
-        name = (
-            user["first_name"]
-            or user["username"]
-            or str(user["user_id"])
-        )
-
-        text += (
-            f"{i + 1}. {name} — "
-            f"{user['points']} ⭐\n"
-        )
-
-    bot.send_message(
-        query.message.chat.id,
-        text,
-        parse_mode="HTML"
+        message.chat.id,
+        f"Твой ID: {message.from_user.id}"
     )
 
 
 # ============================================================
-# ADMIN
+# ADMIN — ADD CARD
 # ============================================================
 
-def is_admin(user_id):
-    return user_id in ADMINS
-
-
-@bot.message_handler(commands=["addcard"])
+@bot.message_handler(
+    commands=["addcard"]
+)
 def addcard(message):
-    user_id = ensure_user(message)
+
+    user_id = ensure_user(
+        message
+    )
 
     if not is_admin(user_id):
+
         bot.send_message(
             message.chat.id,
             "⛔ Нет доступа."
         )
+
         return
 
-    # Формат:
-    # /addcard Имя | Аниме | rarity | points | image_url
+    if not message.text:
+        return
 
-    raw = message.text.replace("/addcard", "", 1).strip()
+    raw = message.text.replace(
+        "/addcard",
+        "",
+        1
+    ).strip()
 
-    parts = [x.strip() for x in raw.split("|")]
+    parts = [
+        x.strip()
+        for x in raw.split("|")
+    ]
 
-    if len(parts) != 5:
+    if len(parts) != 4:
+
         bot.send_message(
             message.chat.id,
-            "❌ Формат:\n\n"
-            "/addcard Имя | Аниме | rarity | points | image_url\n\n"
-            "Редкости:\n"
+            "❌ Формат:\n"
+            "/addcard Имя | Аниме | rarity | points"
+        )
+
+        return
+
+    name, anime, rarity, points = parts
+
+    if not name or not anime:
+
+        bot.send_message(
+            message.chat.id,
+            "❌ Имя и аниме не могут быть пустыми."
+        )
+
+        return
+
+    if rarity not in RARITIES:
+
+        bot.send_message(
+            message.chat.id,
+            "❌ Неизвестная редкость.\n\n"
             "common\n"
             "rare\n"
             "epic\n"
             "legendary\n"
             "mythic"
         )
-        return
 
-    name, anime, rarity, points, image_url = parts
-
-    if rarity not in RARITIES:
-        bot.send_message(
-            message.chat.id,
-            "❌ Неизвестная редкость."
-        )
         return
 
     try:
+
         points = int(points)
+
     except ValueError:
+
         bot.send_message(
             message.chat.id,
             "❌ Очки должны быть числом."
         )
+
         return
 
-    cur = db.execute("""
-        INSERT INTO cards
-        (name, anime, rarity, points, image_url)
-        VALUES (?, ?, ?, ?, ?)
-    """, (
-        name,
-        anime,
-        rarity,
-        points,
-        image_url
-    ))
-
-    db.commit()
-
-    card_id = cur.lastrowid
+    pending_cards[user_id] = {
+        "name": name,
+        "anime": anime,
+        "rarity": rarity,
+        "points": points
+    }
 
     bot.send_message(
         message.chat.id,
-        "✅ <b>Карточка добавлена!</b>\n\n"
-        f"ID: <b>#{card_id}</b>\n"
-        f"👤 {name}\n"
-        f"📺 {anime}\n"
-        f"💎 {RARITIES[rarity]['name']}\n"
-        f"⭐ {points}",
-        parse_mode="HTML"
+        "📷 Отправь изображение карточки следующим сообщением."
     )
 
 
 # ============================================================
-# ADMIN CARD LIST
+# ADMIN — PHOTO
 # ============================================================
 
-@bot.message_handler(commands=["cards"])
-def cards_list(message):
-    user_id = ensure_user(message)
+@bot.message_handler(
+    content_types=["photo"]
+)
+def addcard_photo(message):
+
+    user_id = message.from_user.id
 
     if not is_admin(user_id):
+        return
+
+    if user_id not in pending_cards:
+        return
+
+    if not message.photo:
+        return
+
+    bot.send_message(
+        message.chat.id,
+        "⏳ Сохраняю изображение..."
+    )
+
+    image_bytes = get_photo_bytes(
+        message
+    )
+
+    if not image_bytes:
+
+        bot.send_message(
+            message.chat.id,
+            "❌ Не удалось скачать изображение из UnixGram."
+        )
+
+        return
+
+    data = pending_cards.pop(
+        user_id
+    )
+
+    try:
+
+        # Сначала создаём карточку
+        result = (
+            supabase
+            .table("cards")
+            .insert({
+                "name": data["name"],
+                "anime": data["anime"],
+                "rarity": data["rarity"],
+                "points": data["points"],
+                "image_path": "pending"
+            })
+            .execute()
+        )
+
+        card = result.data[0]
+
+        card_id = card["id"]
+
+        # Загружаем САМ файл в Supabase Storage
+        image_path = upload_image(
+            image_bytes,
+            card_id
+        )
+
+        # Записываем путь в карточку
+        (
+            supabase
+            .table("cards")
+            .update({
+                "image_path": image_path
+            })
+            .eq(
+                "id",
+                card_id
+            )
+            .execute()
+        )
+
+        bot.send_message(
+            message.chat.id,
+            "✅ Карточка добавлена!\n\n"
+            f"🎴 {data['name']}\n"
+            f"📺 {data['anime']}\n"
+            f"💎 {RARITIES[data['rarity']]['name']}\n"
+            f"⭐ {data['points']} очков"
+        )
+
+    except Exception as e:
+
+        print(
+            "ADD CARD ERROR:",
+            repr(e)
+        )
+
+        # Если карточка создалась, но загрузка картинки упала
+        try:
+            if "card_id" in locals():
+
+                supabase \
+                    .table("cards") \
+                    .delete() \
+                    .eq("id", card_id) \
+                    .execute()
+
+        except Exception:
+            pass
+
+        bot.send_message(
+            message.chat.id,
+            "❌ Не удалось сохранить карточку."
+        )
+
+
+# ============================================================
+# ADMIN — CARDS
+# ============================================================
+
+@bot.message_handler(
+    commands=["cards"]
+)
+def cards_list(message):
+
+    user_id = ensure_user(
+        message
+    )
+
+    if not is_admin(user_id):
+
         bot.send_message(
             message.chat.id,
             "⛔ Нет доступа."
         )
+
         return
 
-    cards = db.execute("""
-        SELECT *
-        FROM cards
-        ORDER BY id
-    """).fetchall()
+    result = (
+        supabase
+        .table("cards")
+        .select("*")
+        .order("id")
+        .execute()
+    )
+
+    cards = result.data
 
     if not cards:
+
         bot.send_message(
             message.chat.id,
             "Карточек пока нет."
         )
+
         return
 
-    text = "🎴 <b>КАРТОЧКИ</b>\n\n"
+    lines = [
+        "🎴 КАРТОЧКИ",
+        ""
+    ]
 
     for card in cards:
-        text += (
+
+        rarity = RARITIES.get(
+            card["rarity"]
+        )
+
+        rarity_name = (
+            rarity["name"]
+            if rarity
+            else card["rarity"]
+        )
+
+        lines.append(
             f"#{card['id']} | "
             f"{card['name']} | "
             f"{card['anime']} | "
-            f"{RARITIES[card['rarity']]['name']}\n"
+            f"{rarity_name}"
         )
 
     bot.send_message(
         message.chat.id,
-        text,
-        parse_mode="HTML"
+        "\n".join(lines)
     )
 
 
 # ============================================================
-# ADMIN DELETE
+# ADMIN — DELETE CARD
 # ============================================================
 
-@bot.message_handler(commands=["delcard"])
+@bot.message_handler(
+    commands=["delcard"]
+)
 def delcard(message):
-    user_id = ensure_user(message)
+
+    user_id = ensure_user(
+        message
+    )
 
     if not is_admin(user_id):
+
         bot.send_message(
             message.chat.id,
             "⛔ Нет доступа."
         )
+
+        return
+
+    if not message.text:
         return
 
     parts = message.text.split()
 
     if len(parts) != 2:
+
         bot.send_message(
             message.chat.id,
-            "Использование:\n/delcard ID"
+            "Использование:\n"
+            "/delcard ID"
         )
+
         return
 
     try:
+
         card_id = int(parts[1])
+
     except ValueError:
+
         bot.send_message(
             message.chat.id,
             "❌ ID должен быть числом."
         )
+
         return
 
-    card = get_card(card_id)
+    card = get_card(
+        card_id
+    )
 
     if not card:
+
         bot.send_message(
             message.chat.id,
             "❌ Такой карточки нет."
         )
+
         return
 
-    db.execute(
-        "DELETE FROM cards WHERE id = ?",
-        (card_id,)
-    )
+    image_path = card["image_path"]
 
-    db.execute(
-        "DELETE FROM inventory WHERE card_id = ?",
-        (card_id,)
-    )
+    # Удаляем картинку из Storage
+    try:
 
-    db.commit()
+        if image_path and image_path != "pending":
+
+            (
+                supabase
+                .storage
+                .from_(STORAGE_BUCKET)
+                .remove([
+                    image_path
+                ])
+            )
+
+    except Exception as e:
+
+        print(
+            "STORAGE DELETE ERROR:",
+            repr(e)
+        )
+
+    # Удаляем карточку.
+    # inventory удалится каскадно.
+    (
+        supabase
+        .table("cards")
+        .delete()
+        .eq(
+            "id",
+            card_id
+        )
+        .execute()
+    )
 
     bot.send_message(
         message.chat.id,
@@ -839,55 +1501,72 @@ def delcard(message):
 
 
 # ============================================================
-# ADMIN GIVE CARD
+# ADMIN — GIVE CARD
 # ============================================================
 
-@bot.message_handler(commands=["givecard"])
+@bot.message_handler(
+    commands=["givecard"]
+)
 def givecard(message):
-    user_id = ensure_user(message)
+
+    user_id = ensure_user(
+        message
+    )
 
     if not is_admin(user_id):
+
         bot.send_message(
             message.chat.id,
             "⛔ Нет доступа."
         )
+
+        return
+
+    if not message.text:
         return
 
     parts = message.text.split()
 
     if len(parts) != 3:
+
         bot.send_message(
             message.chat.id,
             "Использование:\n"
             "/givecard USER_ID CARD_ID"
         )
+
         return
 
     try:
+
         target_id = int(parts[1])
         card_id = int(parts[2])
+
     except ValueError:
+
         bot.send_message(
             message.chat.id,
             "❌ ID должны быть числами."
         )
+
         return
 
-    card = get_card(card_id)
+    card = get_card(
+        card_id
+    )
 
     if not card:
+
         bot.send_message(
             message.chat.id,
             "❌ Карточка не найдена."
         )
+
         return
 
-    if not get_user(target_id):
-        db.execute("""
-            INSERT INTO users (user_id)
-            VALUES (?)
-        """, (target_id,))
-        db.commit()
+    ensure_user_id(
+        target_id
+    )
 
     add_card_to_inventory(
         target_id,
@@ -896,75 +1575,273 @@ def givecard(message):
 
     bot.send_message(
         message.chat.id,
-        f"✅ Пользователю <b>{target_id}</b> "
-        f"выдана карточка #{card_id}.",
-        parse_mode="HTML"
+        f"✅ Пользователю {target_id} "
+        f"выдана карточка #{card_id}."
     )
 
 
 # ============================================================
-# ADMIN XP
+# ADMIN — GIVE XP
 # ============================================================
 
-@bot.message_handler(commands=["id"])
-def get_id(message):
-    bot.send_message(
-        message.chat.id,
-        f"Твой ID: {message.from_user.id}"
-    )
-
-@bot.message_handler(commands=["givexp"])
+@bot.message_handler(
+    commands=["givexp"]
+)
 def givexp(message):
-    user_id = ensure_user(message)
+
+    user_id = ensure_user(
+        message
+    )
 
     if not is_admin(user_id):
+
         bot.send_message(
             message.chat.id,
             "⛔ Нет доступа."
         )
+
+        return
+
+    if not message.text:
         return
 
     parts = message.text.split()
 
     if len(parts) != 3:
+
         bot.send_message(
             message.chat.id,
             "Использование:\n"
             "/givexp USER_ID AMOUNT"
         )
+
         return
 
     try:
+
         target_id = int(parts[1])
         amount = int(parts[2])
+
     except ValueError:
+
         bot.send_message(
             message.chat.id,
             "❌ Используй числа."
         )
+
         return
 
-    if not get_user(target_id):
-        db.execute(
-            "INSERT INTO users (user_id) VALUES (?)",
-            (target_id,)
-        )
-        db.commit()
+    ensure_user_id(
+        target_id
+    )
 
-    add_xp(target_id, amount)
+    add_xp(
+        target_id,
+        amount
+    )
+
+    add_points(
+        target_id,
+        amount
+    )
 
     bot.send_message(
         message.chat.id,
-        f"✅ Выдано <b>{amount} XP</b> "
-        f"пользователю {target_id}.",
-        parse_mode="HTML"
+        f"✅ Пользователю {target_id} "
+        f"выдано {amount} очков."
     )
 
 
 # ============================================================
-# RUN
+# ADMIN — BROADCAST
 # ============================================================
 
+@bot.message_handler(
+    commands=["broadcast"]
+)
+def broadcast(message):
+
+    if not is_admin(
+        message.from_user.id
+    ):
+        return
+
+    if not message.text:
+        return
+
+    text = message.text.replace(
+        "/broadcast",
+        "",
+        1
+    ).strip()
+
+    if not text:
+
+        bot.send_message(
+            message.chat.id,
+            "Использование:\n"
+            "/broadcast Текст рассылки"
+        )
+
+        return
+
+    result = (
+        supabase
+        .table("users")
+        .select("user_id")
+        .execute()
+    )
+
+    users = result.data
+
+    sent = 0
+    failed = 0
+
+    for user in users:
+
+        target_id = user["user_id"]
+
+        try:
+
+            bot.send_message(
+                target_id,
+                text
+            )
+
+            sent += 1
+
+        except Exception:
+
+            failed += 1
+
+    bot.send_message(
+        message.chat.id,
+        "Рассылка завершена.\n\n"
+        f"Отправлено: {sent}\n"
+        f"Не доставлено: {failed}"
+    )
+
+
+# ============================================================
+# ADMIN — STATS
+# ============================================================
+
+@bot.message_handler(
+    commands=["stats"]
+)
+def bot_stats(message):
+
+    if not is_admin(
+        message.from_user.id
+    ):
+        return
+
+    users_result = (
+        supabase
+        .table("users")
+        .select("user_id", count="exact")
+        .execute()
+    )
+
+    cards_result = (
+        supabase
+        .table("cards")
+        .select("id", count="exact")
+        .execute()
+    )
+
+    inventory_result = (
+        supabase
+        .table("inventory")
+        .select("amount")
+        .execute()
+    )
+
+    users_data = users_result.data or []
+    cards_data = cards_result.data or []
+    inventory_data = inventory_result.data or []
+
+    users_count = (
+        users_result.count
+        if users_result.count is not None
+        else len(users_data)
+    )
+
+    cards_count = (
+        cards_result.count
+        if cards_result.count is not None
+        else len(cards_data)
+    )
+
+    inventory_cards = sum(
+        row["amount"]
+        for row in inventory_data
+    )
+
+    users_all = (
+        supabase
+        .table("users")
+        .select(
+            "cards_opened, points, xp"
+        )
+        .execute()
+        .data
+    )
+
+    opened = sum(
+        row["cards_opened"] or 0
+        for row in users_all
+    )
+
+    points = sum(
+        row["points"] or 0
+        for row in users_all
+    )
+
+    xp = sum(
+        row["xp"] or 0
+        for row in users_all
+    )
+
+    bot.send_message(
+        message.chat.id,
+        "СТАТИСТИКА ANICARDS\n\n"
+        f"Пользователей: {users_count}\n"
+        f"Карточек в базе: {cards_count}\n"
+        f"Карточек у пользователей: {inventory_cards}\n"
+        f"Открытий: {opened}\n"
+        f"Всего очков: {points}\n"
+        f"Всего XP: {xp}"
+    )
+
+
+# ============================================================
+# START
+# ============================================================
+
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"Anicards OK")
+
+    def log_message(self, format, *args):
+        pass
+
+def run_health_server():
+    port = int(os.getenv("PORT", "10000"))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    print(f"Health server started on port {port}")
+    server.serve_forever()
+
 if __name__ == "__main__":
+
+    threading.Thread(target=run_health_server, daemon=True).start()
+
     print("Anicards started!")
+
     bot.polling()
