@@ -1,15 +1,18 @@
-from unixgram import Bot, InlineKeyboardMarkup, InlineKeyboardButton
-from unixgram.api import InputFile
-from supabase import create_client
-from dotenv import load_dotenv
-
 import os
 import random
-import time
-import io
-import tempfile
-import urllib.request
-import urllib.error
+import string
+import threading
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import requests
+from flask import Flask
+from dotenv import load_dotenv
+from supabase import create_client
+
+from unixgram import Bot, InlineKeyboardMarkup, InlineKeyboardButton
+
 
 # ============================================================
 # CONFIG
@@ -17,1951 +20,1326 @@ import urllib.error
 
 load_dotenv()
 
-TOKEN = os.getenv("UNIXGRAM_TOKEN")
-
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-if not TOKEN:
-    raise RuntimeError("UNIXGRAM_TOKEN не задан")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "169"))
+
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN is not set")
 
 if not SUPABASE_URL:
-    raise RuntimeError("SUPABASE_URL не задан")
+    raise RuntimeError("SUPABASE_URL is not set")
 
 if not SUPABASE_KEY:
-    raise RuntimeError("SUPABASE_KEY не задан")
-
-
-bot = Bot(TOKEN)
-
-supabase = create_client(
-    SUPABASE_URL,
-    SUPABASE_KEY
-)
-
-
-ADMINS = {169}
-
-pending_cards = {}
-
-DROP_COOLDOWN = 6 * 60 * 60
+    raise RuntimeError("SUPABASE_KEY is not set")
 
 
 # ============================================================
-# RARITIES
+# SERVICES
 # ============================================================
 
-RARITIES = {
-    "common": {
-        "name": "Обычная",
-        "chance": 55,
-        "points": 10,
-        "xp": 10
-    },
+bot = Bot(BOT_TOKEN)
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-    "rare": {
-        "name": "Редкая",
-        "chance": 25,
-        "points": 25,
-        "xp": 25
-    },
+app = Flask(__name__)
 
-    "epic": {
-        "name": "Эпическая",
-        "chance": 13,
-        "points": 50,
-        "xp": 50
-    },
+KYIV = ZoneInfo("Europe/Kyiv")
 
-    "legendary": {
-        "name": "Легендарная",
-        "chance": 5,
-        "points": 100,
-        "xp": 100
-    },
+CHECK_URL = "https://unixgram.com/api/account/username/check"
 
-    "mythic": {
-        "name": "Мифическая",
-        "chance": 2,
-        "points": 250,
-        "xp": 250
+FREE_DAILY = 3
+SUB_DAILY = 10
+
+SUB_PRICE = 50
+EXTRA_PRICE = 10
+
+SUB_DAYS = 30
+
+MAX_WORKERS = 4
+
+
+# ============================================================
+# HTTP SERVER FOR RENDER
+# ============================================================
+
+@app.route("/")
+def health():
+    return "UnixScan is running", 200
+
+
+@app.route("/health")
+def health_check():
+    return "OK", 200
+
+
+def run_web():
+    port = int(os.getenv("PORT", "10000"))
+
+    app.run(
+        host="0.0.0.0",
+        port=port,
+        debug=False,
+        use_reloader=False
+    )
+
+
+# ============================================================
+# KEYBOARDS
+# ============================================================
+
+def main_menu(user_id=None):
+
+    rows = [
+        [
+            InlineKeyboardButton("🔎 Найти ники", callback_data="search")
+        ],
+        [
+            InlineKeyboardButton("💎 Подписка", callback_data="subscription"),
+            InlineKeyboardButton("⭐ Купить запрос", callback_data="buy_request")
+        ],
+        [
+            InlineKeyboardButton("📊 Моя статистика", callback_data="stats")
+        ],
+        [
+            InlineKeyboardButton("ℹ️ Как это работает", callback_data="how")
+        ]
+    ]
+
+    if user_id == ADMIN_ID:
+        rows.append([
+            InlineKeyboardButton("🛠 Админ-панель", callback_data="admin")
+        ])
+
+    return InlineKeyboardMarkup(rows)
+
+
+def search_menu():
+
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("4 буквы", callback_data="len_4"),
+            InlineKeyboardButton("5 букв", callback_data="len_5")
+        ],
+        [
+            InlineKeyboardButton("6 букв", callback_data="len_6"),
+            InlineKeyboardButton("7 букв", callback_data="len_7")
+        ],
+        [
+            InlineKeyboardButton("↩️ Назад", callback_data="back")
+        ]
+    ])
+
+
+def style_menu(length):
+
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "🌙 Мягкие",
+                callback_data=f"style_soft_{length}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "⚡ Звучные",
+                callback_data=f"style_sharp_{length}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "💠 Редкие",
+                callback_data=f"style_rare_{length}"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🎲 Смешанные",
+                callback_data=f"style_mixed_{length}"
+            )
+        ],
+        [
+            InlineKeyboardButton("↩️ Назад", callback_data="search")
+        ]
+    ])
+
+
+def after_search_menu():
+
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "🔎 Искать ещё",
+                callback_data="search"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "💎 Подписка",
+                callback_data="subscription"
+            ),
+            InlineKeyboardButton(
+                "⭐ +1 запрос",
+                callback_data="buy_request"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🏠 Главное меню",
+                callback_data="back"
+            )
+        ]
+    ])
+
+
+# ============================================================
+# DATABASE
+# ============================================================
+
+def today():
+    return datetime.now(KYIV).date().isoformat()
+
+
+def get_user(user_id, username=None):
+
+    result = (
+        supabase
+        .table("users")
+        .select("*")
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
+    )
+
+    if result.data:
+        user = result.data[0]
+
+        if user.get("request_date") != today():
+            supabase.table("users").update({
+                "requests_today": 0,
+                "request_date": today()
+            }).eq(
+                "user_id", user_id
+            ).execute()
+
+            user["requests_today"] = 0
+            user["request_date"] = today()
+
+        if username is not None and user.get("username") != username:
+            supabase.table("users").update({
+                "username": username
+            }).eq(
+                "user_id", user_id
+            ).execute()
+
+            user["username"] = username
+
+        return user
+
+    data = {
+        "user_id": user_id,
+        "username": username or "",
+        "requests_today": 0,
+        "request_date": today(),
+        "extra_requests": 0,
+        "subscription_until": None,
+        "total_searches": 0,
+        "found_nicks": 0
     }
+
+    result = (
+        supabase
+        .table("users")
+        .insert(data)
+        .execute()
+    )
+
+    return result.data[0]
+
+
+def update_user(user_id, data):
+    return (
+        supabase
+        .table("users")
+        .update(data)
+        .eq("user_id", user_id)
+        .execute()
+    )
+
+
+# ============================================================
+# SUBSCRIPTION
+# ============================================================
+
+def subscription_active(user):
+
+    until = user.get("subscription_until")
+
+    if not until:
+        return False
+
+    try:
+        dt = datetime.fromisoformat(
+            until.replace("Z", "+00:00")
+        )
+
+        return dt > datetime.now(dt.tzinfo)
+
+    except Exception:
+        return False
+
+
+def subscription_text(user):
+
+    if not subscription_active(user):
+        return (
+            "💎 <b>Подписка UnixScan</b>\n\n"
+            "⭐ Цена: <b>50 Stars</b>\n"
+            "🔎 Лимит: <b>10 поисков в день</b>\n"
+            "📅 Срок: <b>30 дней</b>\n\n"
+            "После оплаты подписка активируется автоматически."
+        )
+
+    until = user.get("subscription_until", "")
+
+    return (
+        "💎 <b>Подписка уже активна</b>\n\n"
+        f"📅 До: <code>{until[:10]}</code>\n"
+        "🔎 Доступно до 10 поисков в день."
+    )
+
+
+# ============================================================
+# REQUEST LIMITS
+# ============================================================
+
+def remaining_requests(user):
+
+    used = int(user.get("requests_today", 0))
+    extra = int(user.get("extra_requests", 0))
+
+    if subscription_active(user):
+        normal_left = max(0, SUB_DAILY - used)
+    else:
+        normal_left = max(0, FREE_DAILY - used)
+
+    return normal_left + extra
+
+
+def consume_request(user_id):
+
+    user = get_user(user_id)
+
+    used = int(user.get("requests_today", 0))
+    extra = int(user.get("extra_requests", 0))
+
+    if subscription_active(user):
+
+        if used < SUB_DAILY:
+            update_user(
+                user_id,
+                {
+                    "requests_today": used + 1
+                }
+            )
+
+            return True
+
+    else:
+
+        if used < FREE_DAILY:
+            update_user(
+                user_id,
+                {
+                    "requests_today": used + 1
+                }
+            )
+
+            return True
+
+    if extra > 0:
+
+        update_user(
+            user_id,
+            {
+                "extra_requests": extra - 1
+            }
+        )
+
+        return True
+
+    return False
+
+
+# ============================================================
+# USERNAME GENERATOR
+# ============================================================
+
+CONSONANTS = "bcdfghjklmnpqrstvwxyz"
+VOWELS = "aeiou"
+
+# Более приятные сочетания.
+GOOD_STARTS = [
+    "dr",
+    "kr",
+    "tr",
+    "pr",
+    "br",
+    "gr",
+    "vr",
+    "sl",
+    "cl",
+    "fl",
+    "st",
+    "sk",
+    "sh",
+    "ch",
+    "th"
+]
+
+BAD_PAIRS = {
+    "qx",
+    "xq",
+    "qz",
+    "zx",
+    "jv",
+    "vj",
+    "wq",
+    "qw",
+    "xx",
+    "qq",
+    "zz",
+    "jj"
 }
 
 
+def random_char(kind):
+
+    if kind == "C":
+        return random.choice(CONSONANTS)
+
+    return random.choice(VOWELS)
+
+
+PATTERNS = {
+    "soft": [
+        "CVCV",
+        "CVCVC",
+        "CVVC",
+        "CVC",
+        "CVVCV"
+    ],
+
+    "sharp": [
+        "CCVC",
+        "CVCC",
+        "CCVCC",
+        "CVCVC",
+        "CCVCV"
+    ],
+
+    "rare": [
+        "CVVC",
+        "CCVCV",
+        "CVCVC",
+        "CVCCV",
+        "CCVVC"
+    ],
+
+    "mixed": [
+        "CVC",
+        "CVCV",
+        "CVCVC",
+        "CVVC",
+        "CVVCV",
+        "CCVC",
+        "CCVCV",
+        "CVCCV"
+    ]
+}
+
+
+def build_pattern(length, style):
+
+    patterns = [
+        p for p in PATTERNS[style]
+        if len(p) == length
+    ]
+
+    if patterns:
+        return random.choice(patterns)
+
+    # Если для конкретной длины шаблонов нет —
+    # строим автоматически.
+    pattern = []
+
+    for i in range(length):
+
+        if i == 0:
+            pattern.append("C")
+
+        elif i % 2 == 1:
+            pattern.append("V")
+
+        else:
+            pattern.append("C")
+
+    return "".join(pattern)
+
+
+def generate_username(length, style):
+
+    pattern = build_pattern(length, style)
+
+    chars = []
+
+    for i, kind in enumerate(pattern):
+
+        if i == 0 and length >= 5 and random.random() < 0.18:
+
+            start = random.choice(GOOD_STARTS)
+
+            if len(start) <= length:
+                chars.extend(start)
+
+                remaining = length - len(chars)
+
+                for j in range(remaining):
+                    next_kind = "V" if j % 2 == 0 else "C"
+                    chars.append(random_char(next_kind))
+
+                break
+
+        chars.append(random_char(kind))
+
+    name = "".join(chars)[:length].lower()
+
+    # Убираем неприятные сочетания.
+    for pair in BAD_PAIRS:
+
+        if pair in name:
+            return generate_username(length, style)
+
+    # Не допускаем три одинаковых подряд.
+    for i in range(len(name) - 2):
+
+        if (
+            name[i]
+            == name[i + 1]
+            == name[i + 2]
+        ):
+            return generate_username(length, style)
+
+    return name.capitalize()
+
+
+def generate_candidates(length, style, count=50):
+
+    result = set()
+
+    attempts = 0
+
+    while len(result) < count and attempts < count * 10:
+
+        attempts += 1
+
+        name = generate_username(
+            length,
+            style
+        )
+
+        if len(name) != length:
+            continue
+
+        result.add(name)
+
+    return list(result)
+
+
 # ============================================================
-# HELPERS
+# UNIXGRAM CHECK
 # ============================================================
 
-def is_admin(user_id):
-    return user_id in ADMINS
+def check_username(username):
+
+    try:
+
+        response = requests.get(
+            CHECK_URL,
+            params={
+                "value": username
+            },
+            timeout=5
+        )
+
+        if response.status_code != 200:
+            return username, False
+
+        data = response.json()
+
+        available = (
+            data.get("success") is True
+            and data.get("data", {}).get("status")
+            == "available"
+        )
+
+        return username, available
+
+    except Exception:
+
+        return username, False
 
 
-def ensure_user(message):
+def find_available(length, style, amount=5):
+
+    candidates = generate_candidates(
+        length,
+        style,
+        60
+    )
+
+    available = []
+
+    with ThreadPoolExecutor(
+        max_workers=MAX_WORKERS
+    ) as executor:
+
+        futures = [
+            executor.submit(
+                check_username,
+                username
+            )
+            for username in candidates
+        ]
+
+        for future in as_completed(futures):
+
+            username, free = future.result()
+
+            if free:
+
+                available.append(username)
+
+                if len(available) >= amount:
+                    break
+
+    return available
+
+
+# ============================================================
+# SEARCH HISTORY
+# ============================================================
+
+def save_search(
+    user_id,
+    length,
+    style,
+    generated,
+    available
+):
+
+    supabase.table("searches").insert({
+        "user_id": user_id,
+        "length": length,
+        "style": style,
+        "generated": generated,
+        "available": available
+    }).execute()
+
+
+def update_search_stats(
+    user_id,
+    found
+):
+
+    user = get_user(user_id)
+
+    update_user(
+        user_id,
+        {
+            "total_searches":
+                int(user.get("total_searches", 0)) + 1,
+
+            "found_nicks":
+                int(user.get("found_nicks", 0)) + found
+        }
+    )
+
+
+# ============================================================
+# PAYMENT
+# ============================================================
+
+def payment_exists(payload):
+
+    result = (
+        supabase
+        .table("payments")
+        .select("id")
+        .eq("payload", payload)
+        .limit(1)
+        .execute()
+    )
+
+    return bool(result.data)
+
+
+def save_payment(
+    user_id,
+    payload,
+    amount
+):
+
+    supabase.table("payments").insert({
+        "user_id": user_id,
+        "payload": payload,
+        "amount": amount
+    }).execute()
+
+
+# ============================================================
+# SEND INVOICE
+# ============================================================
+
+def send_subscription_invoice(chat_id):
+
+    payload = f"sub:{chat_id}:{random.randint(100000, 999999)}"
+
+    bot.send_invoice(
+        chat_id,
+        "💎 UnixScan Premium",
+        "10 поисков ников в день на 30 дней",
+        payload=payload,
+        amount_stars=SUB_PRICE
+    )
+
+
+def send_extra_invoice(chat_id):
+
+    payload = f"extra:{chat_id}:{random.randint(100000, 999999)}"
+
+    bot.send_invoice(
+        chat_id,
+        "⭐ Дополнительный запрос",
+        "Один дополнительный поиск ников",
+        payload=payload,
+        amount_stars=EXTRA_PRICE
+    )
+
+
+# ============================================================
+# /START
+# ============================================================
+
+@bot.message_handler(commands=["start"])
+def start(message):
+
     user_id = message.from_user.id
 
     username = getattr(
         message.from_user,
         "username",
         ""
-    ) or ""
-
-    first_name = getattr(
-        message.from_user,
-        "first_name",
-        ""
-    ) or ""
-
-    result = (
-        supabase
-        .table("users")
-        .upsert({
-            "user_id": user_id,
-            "username": username,
-            "first_name": first_name
-        })
-        .execute()
     )
 
-    return user_id
-
-
-def ensure_user_id(user_id):
-    existing = (
-        supabase
-        .table("users")
-        .select("user_id")
-        .eq("user_id", user_id)
-        .execute()
+    get_user(
+        user_id,
+        username
     )
 
-    if not existing.data:
-        (
-            supabase
-            .table("users")
-            .insert({
-                "user_id": user_id,
-                "username": "",
-                "first_name": "",
-                "xp": 0,
-                "points": 0,
-                "cards_opened": 0,
-                "last_drop": 0
-            })
-            .execute()
+    text = (
+        "🔵 <b>UnixScan</b>\n\n"
+        "Красивые и звучные ники для UnixGram.\n\n"
+        "🔎 Генерирую варианты по сочетаниям букв\n"
+        "⚡ Проверяю их доступность\n"
+        "💠 Показываю только свободные\n\n"
+        "🎁 Бесплатно: <b>3 поиска в день</b>"
+    )
+
+    bot.send_message(
+        message.chat.id,
+        text,
+        reply_markup=main_menu(user_id)
+    )
+
+
+# ============================================================
+# CALLBACKS
+# ============================================================
+
+@bot.callback_query_handler()
+def callbacks(call):
+
+    user_id = call.from_user.id
+
+    # --------------------------------------------------------
+    # BACK
+    # --------------------------------------------------------
+
+    if call.data == "back":
+
+        bot.edit_message_text(
+            call.message.chat.id,
+            call.message.message_id,
+            (
+                "🔵 <b>UnixScan</b>\n\n"
+                "Выбери действие:"
+            ),
+            reply_markup=main_menu(user_id)
         )
 
+        return
 
-def get_user(user_id):
-    result = (
-        supabase
-        .table("users")
-        .select("*")
-        .eq("user_id", user_id)
-        .limit(1)
-        .execute()
-    )
+    # --------------------------------------------------------
+    # SEARCH
+    # --------------------------------------------------------
 
-    if not result.data:
-        return None
+    if call.data == "search":
 
-    return result.data[0]
-
-
-def add_xp(user_id, amount):
-    user = get_user(user_id)
-
-    if not user:
-        ensure_user_id(user_id)
-        user = get_user(user_id)
-
-    new_xp = user["xp"] + amount
-
-    (
-        supabase
-        .table("users")
-        .update({
-            "xp": new_xp
-        })
-        .eq("user_id", user_id)
-        .execute()
-    )
-
-
-def add_points(user_id, amount):
-    user = get_user(user_id)
-
-    if not user:
-        ensure_user_id(user_id)
-        user = get_user(user_id)
-
-    new_points = user["points"] + amount
-
-    (
-        supabase
-        .table("users")
-        .update({
-            "points": new_points
-        })
-        .eq("user_id", user_id)
-        .execute()
-    )
-
-
-def get_level(xp):
-    return xp // 100 + 1
-
-
-# ============================================================
-# INVENTORY
-# ============================================================
-
-def add_card_to_inventory(user_id, card_id):
-
-    result = (
-        supabase
-        .table("inventory")
-        .select("amount")
-        .eq("user_id", user_id)
-        .eq("card_id", card_id)
-        .limit(1)
-        .execute()
-    )
-
-    if result.data:
-
-        amount = result.data[0]["amount"]
-
-        (
-            supabase
-            .table("inventory")
-            .update({
-                "amount": amount + 1
-            })
-            .eq("user_id", user_id)
-            .eq("card_id", card_id)
-            .execute()
+        bot.edit_message_text(
+            call.message.chat.id,
+            call.message.message_id,
+            (
+                "🔎 <b>Поиск ников</b>\n\n"
+                "Выбери длину:"
+            ),
+            reply_markup=search_menu()
         )
 
-        return True
+        return
 
-    (
-        supabase
-        .table("inventory")
-        .insert({
-            "user_id": user_id,
-            "card_id": card_id,
-            "amount": 1
-        })
-        .execute()
-    )
+    # --------------------------------------------------------
+    # LENGTH
+    # --------------------------------------------------------
 
-    return False
+    if call.data.startswith("len_"):
 
+        length = int(
+            call.data.split("_")[1]
+        )
 
-# ============================================================
-# CARDS
-# ============================================================
+        bot.edit_message_text(
+            call.message.chat.id,
+            call.message.message_id,
+            (
+                f"🔎 Длина: <b>{length}</b>\n\n"
+                "Какой стиль ищем?"
+            ),
+            reply_markup=style_menu(length)
+        )
 
-def random_rarity():
+        return
 
-    value = random.uniform(0, 100)
+    # --------------------------------------------------------
+    # STYLE
+    # --------------------------------------------------------
 
-    current = 0
+    if call.data.startswith("style_"):
 
-    for rarity, data in RARITIES.items():
+        parts = call.data.split("_")
 
-        current += data["chance"]
+        style = parts[1]
+        length = int(parts[2])
 
-        if value <= current:
-            return rarity
+        user = get_user(user_id)
 
-    return "common"
+        if not consume_request(user_id):
 
+            bot.edit_message_text(
+                call.message.chat.id,
+                call.message.message_id,
+                (
+                    "🔒 <b>Лимит закончился</b>\n\n"
+                    "У тебя больше нет доступных поисков.\n\n"
+                    "💎 Подписка — 50 ⭐\n"
+                    "⭐ Дополнительный поиск — 10 ⭐"
+                ),
+                reply_markup=after_search_menu()
+            )
 
-def get_random_card():
+            return
 
-    rarity = random_rarity()
+        bot.edit_message_text(
+            call.message.chat.id,
+            call.message.message_id,
+            (
+                "🔎 <b>Ищу ники...</b>\n\n"
+                f"📏 Длина: {length}\n"
+                f"🎨 Стиль: {style}\n\n"
+                "⏳ Проверяю доступность..."
+            )
+        )
 
-    result = (
-        supabase
-        .table("cards")
-        .select("*")
-        .eq("rarity", rarity)
-        .execute()
-    )
+        try:
 
-    cards = result.data
+            available = find_available(
+                length,
+                style,
+                amount=5
+            )
 
-    if not cards:
+        except Exception as e:
+
+            print(
+                "SEARCH ERROR:",
+                repr(e)
+            )
+
+            bot.edit_message_text(
+                call.message.chat.id,
+                call.message.message_id,
+                (
+                    "❌ Не удалось выполнить поиск.\n\n"
+                    "Попробуй ещё раз."
+                ),
+                reply_markup=after_search_menu()
+            )
+
+            return
+
+        save_search(
+            user_id,
+            length,
+            style,
+            60,
+            len(available)
+        )
+
+        update_search_stats(
+            user_id,
+            len(available)
+        )
+
+        if not available:
+
+            text = (
+                "🔎 <b>Результат</b>\n\n"
+                "К сожалению, свободных вариантов "
+                "не найдено.\n\n"
+                "Попробуй другой стиль или длину."
+            )
+
+        else:
+
+            lines = [
+                f"💠 <code>{name}</code>"
+                for name in available
+            ]
+
+            text = (
+                "🔵 <b>Свободные ники</b>\n\n"
+                + "\n".join(lines)
+                + "\n\n"
+                "⚡ Ники проверены прямо сейчас."
+            )
+
+        bot.edit_message_text(
+            call.message.chat.id,
+            call.message.message_id,
+            text,
+            reply_markup=after_search_menu()
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # SUBSCRIPTION
+    # --------------------------------------------------------
+
+    if call.data == "subscription":
+
+        user = get_user(user_id)
+
+        bot.edit_message_text(
+            call.message.chat.id,
+            call.message.message_id,
+            subscription_text(user),
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "💎 Купить за 50 ⭐",
+                        callback_data="buy_subscription"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "↩️ Назад",
+                        callback_data="back"
+                    )
+                ]
+            ])
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # BUY SUB
+    # --------------------------------------------------------
+
+    if call.data == "buy_subscription":
+
+        send_subscription_invoice(
+            call.message.chat.id
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # BUY REQUEST
+    # --------------------------------------------------------
+
+    if call.data == "buy_request":
+
+        send_extra_invoice(
+            call.message.chat.id
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # STATS
+    # --------------------------------------------------------
+
+    if call.data == "stats":
+
+        user = get_user(user_id)
+
+        if subscription_active(user):
+
+            sub_status = "💎 Активна"
+
+        else:
+
+            sub_status = "⚪ Нет"
+
+        left = remaining_requests(user)
+
+        text = (
+            "📊 <b>Моя статистика</b>\n\n"
+            f"🔎 Всего поисков: "
+            f"<b>{user.get('total_searches', 0)}</b>\n"
+            f"💠 Найдено ников: "
+            f"<b>{user.get('found_nicks', 0)}</b>\n"
+            f"⚡ Доступно запросов: "
+            f"<b>{left}</b>\n"
+            f"💎 Подписка: {sub_status}"
+        )
+
+        bot.edit_message_text(
+            call.message.chat.id,
+            call.message.message_id,
+            text,
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "↩️ Назад",
+                        callback_data="back"
+                    )
+                ]
+            ])
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # HOW
+    # --------------------------------------------------------
+
+    if call.data == "how":
+
+        text = (
+            "ℹ️ <b>Как работает UnixScan</b>\n\n"
+            "1️⃣ Ты выбираешь длину ника.\n\n"
+            "2️⃣ Выбираешь стиль сочетания букв.\n\n"
+            "3️⃣ UnixScan генерирует десятки "
+            "вариантов.\n\n"
+            "4️⃣ Каждый вариант проверяется через "
+            "UnixGram.\n\n"
+            "5️⃣ Ты получаешь только свободные ники.\n\n"
+            "🎁 Бесплатно — 3 поиска в день.\n"
+            "💎 Premium — 10 поисков в день.\n"
+            "⭐ Можно докупать отдельные запросы."
+        )
+
+        bot.edit_message_text(
+            call.message.chat.id,
+            call.message.message_id,
+            text,
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "↩️ Назад",
+                        callback_data="back"
+                    )
+                ]
+            ])
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # ADMIN
+    # --------------------------------------------------------
+
+    if call.data == "admin":
+
+        if user_id != ADMIN_ID:
+            return
 
         result = (
             supabase
-            .table("cards")
+            .table("users")
             .select("*")
             .execute()
         )
 
-        cards = result.data
+        users = result.data or []
 
-    if not cards:
-        return None
+        total_users = len(users)
 
-    return random.choice(cards)
-
-
-def get_card(card_id):
-
-    result = (
-        supabase
-        .table("cards")
-        .select("*")
-        .eq("id", card_id)
-        .limit(1)
-        .execute()
-    )
-
-    if not result.data:
-        return None
-
-    return result.data[0]
-
-
-# ============================================================
-# COOLDOWN
-# ============================================================
-
-def can_open(user):
-
-    now = int(time.time())
-
-    last_drop = user["last_drop"] or 0
-
-    return now - last_drop >= DROP_COOLDOWN
-
-
-def get_remaining_cooldown(user):
-
-    now = int(time.time())
-
-    last_drop = user["last_drop"] or 0
-
-    remaining = DROP_COOLDOWN - (now - last_drop)
-
-    if remaining < 0:
-        remaining = 0
-
-    return remaining
-
-
-def format_time(seconds):
-
-    hours = seconds // 3600
-    minutes = (seconds % 3600) // 60
-    secs = seconds % 60
-
-    if hours > 0:
-        return f"{hours}ч {minutes}м"
-
-    if minutes > 0:
-        return f"{minutes}м {secs}с"
-
-    return f"{secs}с"
-
-
-def register_drop(user_id):
-
-    now = int(time.time())
-
-    (
-        supabase
-        .table("users")
-        .update({
-            "last_drop": now
-        })
-        .eq("user_id", user_id)
-        .execute()
-    )
-
-
-# ============================================================
-# STORAGE
-# ============================================================
-
-STORAGE_BUCKET = "anicards"
-
-
-def upload_image(file_bytes, card_id):
-
-    path = f"cards/{card_id}.jpg"
-
-    (
-        supabase
-        .storage
-        .from_(STORAGE_BUCKET)
-        .upload(
-            path,
-            file_bytes,
-            {
-                "content-type": "image/jpeg",
-                "cache-control": "31536000",
-                "upsert": "true"
-            }
-        )
-    )
-
-    return path
-
-
-def get_image_url(path):
-
-    result = (
-        supabase
-        .storage
-        .from_(STORAGE_BUCKET)
-        .get_public_url(path)
-    )
-
-    return result
-
-
-def download_image(path):
-
-    data = (
-        supabase
-        .storage
-        .from_(STORAGE_BUCKET)
-        .download(path)
-    )
-
-    return data
-
-
-# ============================================================
-# PHOTO DOWNLOAD FROM UNIXGRAM
-# ============================================================
-
-def get_photo_bytes(message):
-    if not message.photo:
-        return None
-
-    photo = message.photo[-1]
-
-    if isinstance(photo, dict):
-        file_id = photo.get("file_id")
-    else:
-        file_id = getattr(photo, "file_id", None)
-
-    if not file_id:
-        print("PHOTO ERROR: file_id не найден")
-        print("PHOTO OBJECT:", repr(photo))
-        return None
-
-    print("PHOTO FILE ID:", file_id)
-
-    # file_id в unixgram-py — это уже готовый URL на media.unixgram.com,
-    # отдельного get_file/download_file в библиотеке нет
-    try:
-        req = urllib.request.Request(
-            file_id,
-            headers={"User-Agent": "Mozilla/5.0"}
+        total_searches = sum(
+            int(x.get("total_searches", 0))
+            for x in users
         )
 
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = resp.read()
-
-        print("PHOTO DOWNLOADED:", len(data), "bytes")
-        return data
-
-    except urllib.error.URLError as e:
-        print("DOWNLOAD ERROR:", repr(e))
-        return None
-
-# ============================================================
-# KEYBOARD
-# ============================================================
-
-def main_keyboard():
-    kb = InlineKeyboardMarkup()
-
-    kb.row(
-        InlineKeyboardButton(
-            "🎴 Карточка",
-            callback_data="open_card"
-        ),
-        InlineKeyboardButton(
-            "🎒 Инвентарь",
-            callback_data="inventory"
-        )
-    )
-
-    kb.row(
-        InlineKeyboardButton(
-            "👤 Профиль",
-            callback_data="profile"
-        ),
-        InlineKeyboardButton(
-            "🏆 Топ",
-            callback_data="top"
-        )
-    )
-
-    kb.row(
-        InlineKeyboardButton(
-            "⭐ Поддержать",
-            callback_data="donate_menu"
-        )
-    )
-
-    return kb
-
-
-# ============================================================
-# OPEN CARD
-# ============================================================
-
-def open_random_card(chat_id, user_id):
-
-    user = get_user(user_id)
-
-    if not user:
-        return
-
-    if not can_open(user):
-
-        remaining = get_remaining_cooldown(user)
-
-        bot.send_message(
-            chat_id,
-            "⏳ Карточку пока нельзя открыть.\n\n"
-            f"Следующая будет доступна через {format_time(remaining)}."
+        total_found = sum(
+            int(x.get("found_nicks", 0))
+            for x in users
         )
 
-        return
-
-    card = get_random_card()
-
-    if not card:
-
-        bot.send_message(
-            chat_id,
-            "❌ В базе пока нет карточек."
-        )
-
-        return
-
-    register_drop(user_id)
-
-    rarity = RARITIES.get(
-        card["rarity"],
-        RARITIES["common"]
-    )
-
-    duplicate = add_card_to_inventory(
-        user_id,
-        card["id"]
-    )
-
-    add_xp(
-        user_id,
-        rarity["xp"]
-    )
-
-    add_points(
-        user_id,
-        rarity["points"]
-    )
-
-    if duplicate:
-
-        text = (
-            "🔁 Дубликат\n\n"
-            f"🎴 {card['name']}\n"
-            f"📺 {card['anime']}\n"
-            f"💎 {rarity['name']}\n\n"
-            f"⭐ +{rarity['points']} очков\n"
-            f"✨ +{rarity['xp']} XP"
-        )
-
-    else:
-
-        text = (
-            "🎴 Новая карточка\n\n"
-            f"👤 {card['name']}\n"
-            f"📺 {card['anime']}\n"
-            f"💎 {rarity['name']}\n\n"
-            f"⭐ +{rarity['points']} очков\n"
-            f"✨ +{rarity['xp']} XP"
-        )
-
-        image_path = card["image_path"]
-
-    try:
-
-        image_data = download_image(
-            image_path
-        )
-
-        photo = InputFile(
-            image_data,
-            name="card.jpg",
-            content_type="image/jpeg"
-        )
-
-        bot.send_photo(
-            chat_id,
-            photo
-        )
-
-        bot.send_message(
-            chat_id,
-            text
-        )
-
-    except Exception as e:
-
-        print(
-            "IMAGE ERROR:",
-            repr(e)
-        )
-
-        bot.send_message(
-            chat_id,
-            text
-        )
-# ============================================================
-# CALLBACK — CARD
-# ============================================================
-
-@bot.callback_query_handler(
-    func=lambda q: q.data == "open_card"
-)
-def callback_open_card(query):
-
-    bot.answer_callback_query(
-        query.id
-    )
-
-    user_id = query.from_user.id
-
-    user = get_user(
-        user_id
-    )
-
-    if not user:
-
-        bot.send_message(
-            query.message.chat.id,
-            "Сначала /start."
-        )
-
-        return
-
-    open_random_card(
-        query.message.chat.id,
-        user_id
-    )
-
-
-# ============================================================
-# CALLBACK — INVENTORY
-# ============================================================
-
-@bot.callback_query_handler(
-    func=lambda q: q.data == "inventory"
-)
-def callback_inventory(query):
-
-    bot.answer_callback_query(
-        query.id
-    )
-
-    user_id = query.from_user.id
-
-    result = (
-        supabase
-        .table("inventory")
-        .select(
-            "card_id, amount, cards(name, anime, rarity)"
-        )
-        .eq("user_id", user_id)
-        .order("card_id")
-        .execute()
-    )
-
-    rows = result.data
-
-    if not rows:
-
-        bot.send_message(
-            query.message.chat.id,
-            "🎒 Инвентарь пуст."
-        )
-
-        return
-
-    lines = [
-        "🎒 Коллекция",
-        ""
-    ]
-
-    for row in rows:
-
-        card = row.get("cards")
-
-        if not card:
-            continue
-
-        rarity = RARITIES.get(
-            card["rarity"],
-            RARITIES["common"]
-        )
-
-        lines.append(
-            f"🎴 {card['name']}\n"
-            f"   📺 {card['anime']}\n"
-            f"   💎 {rarity['name']} · x{row['amount']}"
-        )
-
-    bot.send_message(
-        query.message.chat.id,
-        "\n".join(lines)
-    )
-
-
-# ============================================================
-# CALLBACK — PROFILE
-# ============================================================
-
-@bot.callback_query_handler(
-    func=lambda q: q.data == "profile"
-)
-def callback_profile(query):
-
-    bot.answer_callback_query(
-        query.id
-    )
-
-    user = get_user(
-        query.from_user.id
-    )
-
-    if not user:
-
-        bot.send_message(
-            query.message.chat.id,
-            "Сначала /start."
-        )
-
-        return
-
-    inventory_result = (
-        supabase
-        .table("inventory")
-        .select("amount")
-        .eq(
-            "user_id",
-            query.from_user.id
-        )
-        .execute()
-    )
-
-    cards_count = sum(
-        row["amount"]
-        for row in inventory_result.data
-    )
-
-    unique_count = len(
-        inventory_result.data
-    )
-
-    name = (
-        user["first_name"]
-        or user["username"]
-        or str(user["user_id"])
-    )
-
-    bot.send_message(
-        query.message.chat.id,
-        "👤 Профиль\n\n"
-        f" {name}\n"
-        f" Очки: {user['points']}\n"
-        f" XP: {user['xp']}\n"
-        f" Уровень: {get_level(user['xp'])}\n"
-        f" Карточек: {cards_count}\n"
-        f" Уникальных: {unique_count}"
-    )
-
-
-# ============================================================
-# CALLBACK — TOP
-# ============================================================
-
-@bot.callback_query_handler(
-    func=lambda q: q.data == "top"
-)
-def callback_top(query):
-
-    bot.answer_callback_query(
-        query.id
-    )
-
-    result = (
-        supabase
-        .table("users")
-        .select("*")
-        .order(
-            "points",
-            desc=True
-        )
-        .limit(10)
-        .execute()
-    )
-
-    users = result.data
-
-    if not users:
-
-        bot.send_message(
-            query.message.chat.id,
-            "🏆 Пока никто не набрал очков."
-        )
-
-        return
-
-    lines = [
-        "🏆 Топ",
-        ""
-    ]
-
-    for i, user in enumerate(users):
-
-        name = (
-            user["first_name"]
-            or user["username"]
-            or str(user["user_id"])
-        )
-
-        lines.append(
-            f"{i + 1}. {name} — "
-            f"{user['points']}"
-        )
-
-    bot.send_message(
-        query.message.chat.id,
-        "\n".join(lines)
-    )
-
-
-# ============================================================
-# START
-# ============================================================
-
-@bot.message_handler(
-    commands=["start"]
-)
-def start(message):
-
-    ensure_user(message)
-
-    bot.send_message(
-        message.chat.id,
-        "🎴 Anicards\n\n"
-        "Коллекционируй карточки аниме-персонажей.\n\n"
-        "Открывай карточки и собирай коллекцию.\n"
-        "За карточки получаешь XP и очки.\n\n"
-        "Нажми кнопку ниже.\n\n"
-        "Автор: @drowsy",
-        reply_markup=main_keyboard()
-    )
-
-
-# ============================================================
-# HELP
-# ============================================================
-
-@bot.message_handler(
-    commands=["help"]
-)
-def help_command(message):
-
-    ensure_user(message)
-
-    bot.send_message(
-        message.chat.id,
-        "🎴 Anicards\n\n"
-        "/card — открыть карточку\n"
-        "/inventory — коллекция\n"
-        "/profile — профиль\n"
-        "/top — таблица лидеров\n"
-        "/id — узнать свой ID\n"
-        "/help — помощь"
-    )
-
-
-# ============================================================
-# CARD COMMAND
-# ============================================================
-
-@bot.message_handler(
-    commands=["card"]
-)
-def card_command(message):
-
-    user_id = ensure_user(
-        message
-    )
-
-    open_random_card(
-        message.chat.id,
-        user_id
-    )
-
-
-# ============================================================
-# INVENTORY COMMAND
-# ============================================================
-
-@bot.message_handler(
-    commands=["inventory"]
-)
-def inventory(message):
-
-    user_id = ensure_user(
-        message
-    )
-
-    result = (
-        supabase
-        .table("inventory")
-        .select(
-            "card_id, amount, cards(name, anime, rarity)"
-        )
-        .eq(
-            "user_id",
-            user_id
-        )
-        .order("card_id")
-        .execute()
-    )
-
-    rows = result.data
-
-    if not rows:
-
-        bot.send_message(
-            message.chat.id,
-            "🎒 Инвентарь пуст.\n\n"
-            "Открой первую карточку через /card"
-        )
-
-        return
-
-    lines = [
-        "🎒 Коллекция",
-        ""
-    ]
-
-    for row in rows:
-
-        card = row.get("cards")
-
-        if not card:
-            continue
-
-        rarity = RARITIES.get(
-            card["rarity"],
-            RARITIES["common"]
-        )
-
-        lines.append(
-            f"#{row['card_id']} — {card['name']}\n"
-            f"   📺 {card['anime']} · "
-            f"{rarity['name']} · "
-            f"x{row['amount']}"
-        )
-
-    bot.send_message(
-        message.chat.id,
-        "\n".join(lines)
-    )
-
-
-# ============================================================
-# PROFILE COMMAND
-# ============================================================
-
-@bot.message_handler(
-    commands=["profile"]
-)
-def profile(message):
-
-    user_id = ensure_user(
-        message
-    )
-
-    user = get_user(
-        user_id
-    )
-
-    inventory_result = (
-        supabase
-        .table("inventory")
-        .select("amount")
-        .eq(
-            "user_id",
-            user_id
-        )
-        .execute()
-    )
-
-    cards_count = sum(
-        row["amount"]
-        for row in inventory_result.data
-    )
-
-    unique_count = len(
-        inventory_result.data
-    )
-
-    name = (
-        user["first_name"]
-        or user["username"]
-        or str(user_id)
-    )
-
-    bot.send_message(
-        message.chat.id,
-        " Профиль\n\n"
-        f" {name}\n"
-        f" Очки: {user['points']}\n"
-        f" XP: {user['xp']}\n"
-        f" Уровень: {get_level(user['xp'])}\n"
-        f" Карточек: {cards_count}\n"
-        f" Уникальных: {unique_count}"
-    )
-
-
-# ============================================================
-# TOP COMMAND
-# ============================================================
-
-@bot.message_handler(
-    commands=["top"]
-)
-def top(message):
-
-    ensure_user(
-        message
-    )
-
-    result = (
-        supabase
-        .table("users")
-        .select("*")
-        .order(
-            "points",
-            desc=True
-        )
-        .limit(10)
-        .execute()
-    )
-
-    users = result.data
-
-    if not users:
-
-        bot.send_message(
-            message.chat.id,
-            "🏆 Пока никто не набрал очков."
-        )
-
-        return
-
-    lines = [
-        "🏆 Топ",
-        ""
-    ]
-
-    for i, user in enumerate(users):
-
-        name = (
-            user["first_name"]
-            or user["username"]
-            or str(user["user_id"])
-        )
-
-        lines.append(
-            f"{i + 1}. {name} — "
-            f"{user['points']} ⭐"
-        )
-
-    bot.send_message(
-        message.chat.id,
-        "\n".join(lines)
-    )
-
-
-# ============================================================
-# ID
-# ============================================================
-
-@bot.message_handler(
-    commands=["id"]
-)
-def get_id(message):
-
-    bot.send_message(
-        message.chat.id,
-        f"Твой ID: {message.from_user.id}"
-    )
-
-
-# ============================================================
-# ADMIN — ADD CARD
-# ============================================================
-
-@bot.message_handler(
-    commands=["addcard"]
-)
-def addcard(message):
-
-    user_id = ensure_user(
-        message
-    )
-
-    if not is_admin(user_id):
-
-        bot.send_message(
-            message.chat.id,
-            "⛔ Нет доступа."
-        )
-
-        return
-
-    if not message.text:
-        return
-
-    raw = message.text.replace(
-        "/addcard",
-        "",
-        1
-    ).strip()
-
-    parts = [
-        x.strip()
-        for x in raw.split("|")
-    ]
-
-    if len(parts) != 4:
-
-        bot.send_message(
-            message.chat.id,
-            "❌ Формат:\n"
-            "/addcard Имя | Аниме | rarity | points"
-        )
-
-        return
-
-    name, anime, rarity, points = parts
-
-    if not name or not anime:
-
-        bot.send_message(
-            message.chat.id,
-            "❌ Имя и аниме не могут быть пустыми."
-        )
-
-        return
-
-    if rarity not in RARITIES:
-
-        bot.send_message(
-            message.chat.id,
-            "❌ Неизвестная редкость.\n\n"
-            "common\n"
-            "rare\n"
-            "epic\n"
-            "legendary\n"
-            "mythic"
-        )
-
-        return
-
-    try:
-
-        points = int(points)
-
-    except ValueError:
-
-        bot.send_message(
-            message.chat.id,
-            "❌ Очки должны быть числом."
-        )
-
-        return
-
-    pending_cards[user_id] = {
-        "name": name,
-        "anime": anime,
-        "rarity": rarity,
-        "points": points
-    }
-
-    bot.send_message(
-        message.chat.id,
-        "📷 Отправь изображение карточки следующим сообщением."
-    )
-
-
-# ============================================================
-# ADMIN — PHOTO
-# ============================================================
-
-@bot.message_handler(
-    content_types=["photo"]
-)
-def addcard_photo(message):
-
-    user_id = message.from_user.id
-
-    if not is_admin(user_id):
-        return
-
-    if user_id not in pending_cards:
-        return
-
-    if not message.photo:
-        return
-
-    bot.send_message(
-        message.chat.id,
-        "⏳ Сохраняю изображение..."
-    )
-
-    image_bytes = get_photo_bytes(
-        message
-    )
-
-    if not image_bytes:
-
-        bot.send_message(
-            message.chat.id,
-            "❌ Не удалось скачать изображение из UnixGram."
-        )
-
-        return
-
-    data = pending_cards.pop(
-        user_id
-    )
-
-    try:
-
-        # Сначала создаём карточку
-        result = (
+        payments = (
             supabase
-            .table("cards")
-            .insert({
-                "name": data["name"],
-                "anime": data["anime"],
-                "rarity": data["rarity"],
-                "points": data["points"],
-                "image_path": "pending"
-            })
+            .table("payments")
+            .select("*")
             .execute()
         )
 
-        card = result.data[0]
+        payments_data = payments.data or []
 
-        card_id = card["id"]
-
-        # Загружаем САМ файл в Supabase Storage
-        image_path = upload_image(
-            image_bytes,
-            card_id
+        stars = sum(
+            int(x.get("amount", 0))
+            for x in payments_data
         )
 
-        # Записываем путь в карточку
-        (
-            supabase
-            .table("cards")
-            .update({
-                "image_path": image_path
-            })
-            .eq(
-                "id",
-                card_id
-            )
-            .execute()
+        text = (
+            "🛠 <b>Админ-панель</b>\n\n"
+            f"👤 Пользователей: <b>{total_users}</b>\n"
+            f"🔎 Поисков: <b>{total_searches}</b>\n"
+            f"💠 Найдено ников: <b>{total_found}</b>\n"
+            f"⭐ Получено Stars: <b>{stars}</b>\n"
+            f"💳 Платежей: <b>{len(payments_data)}</b>"
         )
 
-        bot.send_message(
-            message.chat.id,
-            "✅ Карточка добавлена!\n\n"
-            f"🎴 {data['name']}\n"
-            f"📺 {data['anime']}\n"
-            f"💎 {RARITIES[data['rarity']]['name']}\n"
-            f"⭐ {data['points']} очков"
+        bot.edit_message_text(
+            call.message.chat.id,
+            call.message.message_id,
+            text,
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "↩️ Назад",
+                        callback_data="back"
+                    )
+                ]
+            ])
         )
 
-    except Exception as e:
-
-        print(
-            "ADD CARD ERROR:",
-            repr(e)
-        )
-
-        # Если карточка создалась, но загрузка картинки упала
-        try:
-            if "card_id" in locals():
-
-                supabase \
-                    .table("cards") \
-                    .delete() \
-                    .eq("id", card_id) \
-                    .execute()
-
-        except Exception:
-            pass
-
-        bot.send_message(
-            message.chat.id,
-            "❌ Не удалось сохранить карточку."
-        )
+        return
 
 
 # ============================================================
-# ADMIN — CARDS
+# PRE-CHECKOUT
 # ============================================================
-
-@bot.message_handler(
-    commands=["cards"]
-)
-def cards_list(message):
-
-    user_id = ensure_user(
-        message
-    )
-
-    if not is_admin(user_id):
-
-        bot.send_message(
-            message.chat.id,
-            "⛔ Нет доступа."
-        )
-
-        return
-
-    result = (
-        supabase
-        .table("cards")
-        .select("*")
-        .order("id")
-        .execute()
-    )
-
-    cards = result.data
-
-    if not cards:
-
-        bot.send_message(
-            message.chat.id,
-            "Карточек пока нет."
-        )
-
-        return
-
-    lines = [
-        "🎴 КАРТОЧКИ",
-        ""
-    ]
-
-    for card in cards:
-
-        rarity = RARITIES.get(
-            card["rarity"]
-        )
-
-        rarity_name = (
-            rarity["name"]
-            if rarity
-            else card["rarity"]
-        )
-
-        lines.append(
-            f"#{card['id']} | "
-            f"{card['name']} | "
-            f"{card['anime']} | "
-            f"{rarity_name}"
-        )
-
-    bot.send_message(
-        message.chat.id,
-        "\n".join(lines)
-    )
-
-
-# ============================================================
-# ADMIN — DELETE CARD
-# ============================================================
-
-@bot.message_handler(
-    commands=["delcard"]
-)
-def delcard(message):
-
-    user_id = ensure_user(
-        message
-    )
-
-    if not is_admin(user_id):
-
-        bot.send_message(
-            message.chat.id,
-            "⛔ Нет доступа."
-        )
-
-        return
-
-    if not message.text:
-        return
-
-    parts = message.text.split()
-
-    if len(parts) != 2:
-
-        bot.send_message(
-            message.chat.id,
-            "Использование:\n"
-            "/delcard ID"
-        )
-
-        return
-
-    try:
-
-        card_id = int(parts[1])
-
-    except ValueError:
-
-        bot.send_message(
-            message.chat.id,
-            "❌ ID должен быть числом."
-        )
-
-        return
-
-    card = get_card(
-        card_id
-    )
-
-    if not card:
-
-        bot.send_message(
-            message.chat.id,
-            "❌ Такой карточки нет."
-        )
-
-        return
-
-    image_path = card["image_path"]
-
-    # Удаляем картинку из Storage
-    try:
-
-        if image_path and image_path != "pending":
-
-            (
-                supabase
-                .storage
-                .from_(STORAGE_BUCKET)
-                .remove([
-                    image_path
-                ])
-            )
-
-    except Exception as e:
-
-        print(
-            "STORAGE DELETE ERROR:",
-            repr(e)
-        )
-
-    # Удаляем карточку.
-    # inventory удалится каскадно.
-    (
-        supabase
-        .table("cards")
-        .delete()
-        .eq(
-            "id",
-            card_id
-        )
-        .execute()
-    )
-
-    bot.send_message(
-        message.chat.id,
-        f"🗑 Карточка #{card_id} удалена."
-    )
-
-
-# ============================================================
-# ADMIN — GIVE CARD
-# ============================================================
-
-@bot.message_handler(
-    commands=["givecard"]
-)
-def givecard(message):
-
-    user_id = ensure_user(
-        message
-    )
-
-    if not is_admin(user_id):
-
-        bot.send_message(
-            message.chat.id,
-            "⛔ Нет доступа."
-        )
-
-        return
-
-    if not message.text:
-        return
-
-    parts = message.text.split()
-
-    if len(parts) != 3:
-
-        bot.send_message(
-            message.chat.id,
-            "Использование:\n"
-            "/givecard USER_ID CARD_ID"
-        )
-
-        return
-
-    try:
-
-        target_id = int(parts[1])
-        card_id = int(parts[2])
-
-    except ValueError:
-
-        bot.send_message(
-            message.chat.id,
-            "❌ ID должны быть числами."
-        )
-
-        return
-
-    card = get_card(
-        card_id
-    )
-
-    if not card:
-
-        bot.send_message(
-            message.chat.id,
-            "❌ Карточка не найдена."
-        )
-
-        return
-
-    ensure_user_id(
-        target_id
-    )
-
-    add_card_to_inventory(
-        target_id,
-        card_id
-    )
-
-    bot.send_message(
-        message.chat.id,
-        f"✅ Пользователю {target_id} "
-        f"выдана карточка #{card_id}."
-    )
-
-
-# ============================================================
-# ADMIN — GIVE XP
-# ============================================================
-
-@bot.message_handler(
-    commands=["givexp"]
-)
-def givexp(message):
-
-    user_id = ensure_user(
-        message
-    )
-
-    if not is_admin(user_id):
-
-        bot.send_message(
-            message.chat.id,
-            "⛔ Нет доступа."
-        )
-
-        return
-
-    if not message.text:
-        return
-
-    parts = message.text.split()
-
-    if len(parts) != 3:
-
-        bot.send_message(
-            message.chat.id,
-            "Использование:\n"
-            "/givexp USER_ID AMOUNT"
-        )
-
-        return
-
-    try:
-
-        target_id = int(parts[1])
-        amount = int(parts[2])
-
-    except ValueError:
-
-        bot.send_message(
-            message.chat.id,
-            "❌ Используй числа."
-        )
-
-        return
-
-    ensure_user_id(
-        target_id
-    )
-
-    add_xp(
-        target_id,
-        amount
-    )
-
-    add_points(
-        target_id,
-        amount
-    )
-
-    bot.send_message(
-        message.chat.id,
-        f"✅ Пользователю {target_id} "
-        f"выдано {amount} очков."
-    )
-
-
-# ============================================================
-# ADMIN — BROADCAST
-# ============================================================
-
-@bot.message_handler(
-    commands=["broadcast"]
-)
-def broadcast(message):
-
-    if not is_admin(
-        message.from_user.id
-    ):
-        return
-
-    if not message.text:
-        return
-
-    text = message.text.replace(
-        "/broadcast",
-        "",
-        1
-    ).strip()
-
-    if not text:
-
-        bot.send_message(
-            message.chat.id,
-            "Использование:\n"
-            "/broadcast Текст рассылки"
-        )
-
-        return
-
-    result = (
-        supabase
-        .table("users")
-        .select("user_id")
-        .execute()
-    )
-
-    users = result.data
-
-    sent = 0
-    failed = 0
-
-    for user in users:
-
-        target_id = user["user_id"]
-
-        try:
-
-            bot.send_message(
-                target_id,
-                text
-            )
-
-            sent += 1
-
-        except Exception:
-
-            failed += 1
-
-    bot.send_message(
-        message.chat.id,
-        "Рассылка завершена.\n\n"
-        f"Отправлено: {sent}\n"
-        f"Не доставлено: {failed}"
-    )
-
-
-# ============================================================
-# ADMIN — STATS
-# ============================================================
-
-@bot.message_handler(
-    commands=["stats"]
-)
-def bot_stats(message):
-
-    if not is_admin(
-        message.from_user.id
-    ):
-        return
-
-    users_result = (
-        supabase
-        .table("users")
-        .select("user_id", count="exact")
-        .execute()
-    )
-
-    cards_result = (
-        supabase
-        .table("cards")
-        .select("id", count="exact")
-        .execute()
-    )
-
-    inventory_result = (
-        supabase
-        .table("inventory")
-        .select("amount")
-        .execute()
-    )
-
-    users_data = users_result.data or []
-    cards_data = cards_result.data or []
-    inventory_data = inventory_result.data or []
-
-    users_count = (
-        users_result.count
-        if users_result.count is not None
-        else len(users_data)
-    )
-
-    cards_count = (
-        cards_result.count
-        if cards_result.count is not None
-        else len(cards_data)
-    )
-
-    inventory_cards = sum(
-        row["amount"]
-        for row in inventory_data
-    )
-
-    users_all = (
-        supabase
-        .table("users")
-        .select(
-            "cards_opened, points, xp"
-        )
-        .execute()
-        .data
-    )
-
-    opened = sum(
-        row["cards_opened"] or 0
-        for row in users_all
-    )
-
-    points = sum(
-        row["points"] or 0
-        for row in users_all
-    )
-
-    xp = sum(
-        row["xp"] or 0
-        for row in users_all
-    )
-
-    bot.send_message(
-        message.chat.id,
-        "СТАТИСТИКА ANICARDS\n\n"
-        f"Пользователей: {users_count}\n"
-        f"Карточек в базе: {cards_count}\n"
-        f"Карточек у пользователей: {inventory_cards}\n"
-        f"Открытий: {opened}\n"
-        f"Всего очков: {points}\n"
-        f"Всего XP: {xp}"
-    )
-
-DONATE_AMOUNTS = [10, 50, 100, 250, 500]
-
-
-def donation_keyboard():
-    kb = InlineKeyboardMarkup()
-
-    kb.row(
-        InlineKeyboardButton("⭐ 10", callback_data="donate_10"),
-        InlineKeyboardButton("⭐ 50", callback_data="donate_50"),
-        InlineKeyboardButton("⭐ 100", callback_data="donate_100")
-    )
-
-    kb.row(
-        InlineKeyboardButton("⭐ 250", callback_data="donate_250"),
-        InlineKeyboardButton("⭐ 500", callback_data="donate_500")
-    )
-
-    return kb
-
-
-@bot.message_handler(commands=["donate"])
-def donate(message):
-    ensure_user(message)
-
-    bot.send_message(
-        message.chat.id,
-        "⭐ Поддержать Anicards\n\n"
-        "Выбери количество звезд, которое хочешь отправить:",
-        reply_markup=donation_keyboard()
-    )
-
-
-@bot.callback_query_handler(
-    func=lambda q: q.data.startswith("donate_")
-)
-def donation_callback(query):
-
-    try:
-        amount = int(query.data.replace("donate_", ""))
-    except ValueError:
-        bot.answer_callback_query(query.id, "❌ Ошибка.")
-        return
-
-    if amount not in DONATE_AMOUNTS:
-        bot.answer_callback_query(query.id, "❌ Недопустимая сумма.")
-        return
-
-    bot.answer_callback_query(query.id)
-
-    bot.send_invoice(
-        query.message.chat.id,
-        "Поддержка Anicards",
-        f"Донат {amount} звезд",
-        payload=f"donate-{amount}",
-        amount_stars=amount
-    )
-
 
 @bot.pre_checkout_query_handler()
-def donation_checkout(query):
-    # Telegram требует ответить в течение 10 секунд.
-    bot.answer_pre_checkout_query(
-        query.id,
-        ok=True
-    )
+def pre_checkout(query):
 
+    try:
+
+        bot.answer_pre_checkout_query(
+            query.id,
+            ok=True
+        )
+
+    except Exception as e:
+
+        print(
+            "PRECHECKOUT ERROR:",
+            repr(e)
+        )
+
+
+# ============================================================
+# SUCCESSFUL PAYMENT
+# ============================================================
 
 @bot.message_handler(
     content_types=["successful_payment"]
 )
-def successful_donation(message):
-
-    payment = message.successful_payment
-
-    payload = getattr(
-        payment,
-        "invoice_payload",
-        ""
-    )
-
-    if not payload.startswith("donate-"):
-        return
+def successful_payment(message):
 
     try:
-        amount = int(payload.replace("donate-", ""))
-    except ValueError:
-        return
 
-    user_id = message.from_user.id
+        payment = message.successful_payment
+
+        payload = payment.invoice_payload
+        amount = payment.total_amount
+        user_id = message.from_user.id
+
+        print(
+            f"PAYMENT: user={user_id}, "
+            f"amount={amount}, "
+            f"payload={payload}"
+        )
+
+        # Защита от повторной обработки.
+        if payment_exists(payload):
+
+            print(
+                "Payment already processed:",
+                payload
+            )
+
+            return
+
+        save_payment(
+            user_id,
+            payload,
+            amount
+        )
+
+        user = get_user(user_id)
+
+        # ----------------------------------------------------
+        # SUBSCRIPTION
+        # ----------------------------------------------------
+
+        if payload.startswith("sub:"):
+
+            current = datetime.now(KYIV)
+
+            until_raw = user.get(
+                "subscription_until"
+            )
+
+            if until_raw:
+
+                try:
+
+                    old_until = datetime.fromisoformat(
+                        until_raw.replace(
+                            "Z",
+                            "+00:00"
+                        )
+                    )
+
+                    if old_until > current:
+
+                        current = old_until.astimezone(
+                            KYIV
+                        )
+
+                except Exception:
+                    pass
+
+            until = current + timedelta(
+                days=SUB_DAYS
+            )
+
+            update_user(
+                user_id,
+                {
+                    "subscription_until":
+                        until.isoformat()
+                }
+            )
+
+            bot.send_message(
+                message.chat.id,
+                (
+                    "💎 <b>Подписка активирована!</b>\n\n"
+                    "⭐ Оплата: <b>50 Stars</b>\n"
+                    "🔎 Лимит: <b>10 поисков в день</b>\n"
+                    f"📅 До: <b>{until.date()}</b>\n\n"
+                    "Теперь можешь искать больше ников."
+                ),
+                reply_markup=main_menu(user_id)
+            )
+
+            return
+
+        # ----------------------------------------------------
+        # EXTRA REQUEST
+        # ----------------------------------------------------
+
+        if payload.startswith("extra:"):
+
+            extra = int(
+                user.get("extra_requests", 0)
+            )
+
+            update_user(
+                user_id,
+                {
+                    "extra_requests": extra + 1
+                }
+            )
+
+            bot.send_message(
+                message.chat.id,
+                (
+                    "⭐ <b>Запрос добавлен!</b>\n\n"
+                    "Тебе добавлен ещё <b>1 поиск</b>.\n\n"
+                    "Можешь использовать его прямо сейчас."
+                ),
+                reply_markup=main_menu(user_id)
+            )
+
+            return
+
+    except Exception as e:
+
+        print(
+            "PAYMENT ERROR:",
+            repr(e)
+        )
+
+
+# ============================================================
+# ERROR LOGGING
+# ============================================================
+
+def start_bot():
+
+    print("===================================")
+    print("🔵 UnixScan starting...")
+    print("===================================")
 
     print(
-        f"DONATION: user={user_id}, "
-        f"amount={amount} Stars"
+        "Admin:",
+        ADMIN_ID
     )
 
-    bot.send_message(
-        message.chat.id,
-        "⭐ Спасибо за поддержку Anicards!\n\n"
-        f"Твой донат: {amount} Stars."
+    print(
+        "Supabase:",
+        SUPABASE_URL
     )
 
-@bot.callback_query_handler(
-    func=lambda q: q.data == "donate_menu"
-)
-def donate_menu_callback(query):
-    bot.answer_callback_query(query.id)
+    bot.polling()
 
-    bot.send_message(
-        query.message.chat.id,
-        "⭐ Поддержать Anicards\n\n"
-        "Выбери количество Telegram Stars:",
-        reply_markup=donation_keyboard()
-    )
 
 # ============================================================
-# START
+# MAIN
 # ============================================================
-
-import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
-
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(b"Anicards OK")
-
-    def log_message(self, format, *args):
-        pass
-
-def run_health_server():
-    port = int(os.getenv("PORT", "10000"))
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    print(f"Health server started on port {port}")
-    server.serve_forever()
 
 if __name__ == "__main__":
 
-    threading.Thread(target=run_health_server, daemon=True).start()
+    web_thread = threading.Thread(
+        target=run_web,
+        daemon=True
+    )
 
-    print("Anicards started!")
+    web_thread.start()
 
-    bot.polling()
+    start_bot()
