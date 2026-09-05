@@ -482,7 +482,6 @@ def get_photo_bytes(message):
 # ============================================================
 
 def main_keyboard():
-
     kb = InlineKeyboardMarkup()
 
     kb.row(
@@ -504,6 +503,13 @@ def main_keyboard():
         InlineKeyboardButton(
             "🏆 Топ",
             callback_data="top"
+        )
+    )
+
+    kb.row(
+        InlineKeyboardButton(
+            "⭐ Поддержать",
+            callback_data="donate_menu"
         )
     )
 
@@ -1815,6 +1821,119 @@ def bot_stats(message):
         f"Всего XP: {xp}"
     )
 
+DONATE_AMOUNTS = [10, 50, 100, 250, 500]
+
+
+def donation_keyboard():
+    kb = InlineKeyboardMarkup()
+
+    kb.row(
+        InlineKeyboardButton("⭐ 10", callback_data="donate_10"),
+        InlineKeyboardButton("⭐ 50", callback_data="donate_50"),
+        InlineKeyboardButton("⭐ 100", callback_data="donate_100")
+    )
+
+    kb.row(
+        InlineKeyboardButton("⭐ 250", callback_data="donate_250"),
+        InlineKeyboardButton("⭐ 500", callback_data="donate_500")
+    )
+
+    return kb
+
+
+@bot.message_handler(commands=["donate"])
+def donate(message):
+    ensure_user(message)
+
+    bot.send_message(
+        message.chat.id,
+        "⭐ Поддержать Anicards\n\n"
+        "Выбери количество Telegram Stars, которое хочешь отправить:",
+        reply_markup=donation_keyboard()
+    )
+
+
+@bot.callback_query_handler(
+    func=lambda q: q.data.startswith("donate_")
+)
+def donation_callback(query):
+
+    try:
+        amount = int(query.data.replace("donate_", ""))
+    except ValueError:
+        bot.answer_callback_query(query.id, "❌ Ошибка.")
+        return
+
+    if amount not in DONATE_AMOUNTS:
+        bot.answer_callback_query(query.id, "❌ Недопустимая сумма.")
+        return
+
+    bot.answer_callback_query(query.id)
+
+    bot.send_invoice(
+        query.message.chat.id,
+        "Поддержка Anicards",
+        f"Донат {amount} Telegram Stars",
+        payload=f"donate-{amount}",
+        amount_stars=amount
+    )
+
+
+@bot.pre_checkout_query_handler()
+def donation_checkout(query):
+    # Telegram требует ответить в течение 10 секунд.
+    bot.answer_pre_checkout_query(
+        query.id,
+        ok=True
+    )
+
+
+@bot.message_handler(
+    content_types=["successful_payment"]
+)
+def successful_donation(message):
+
+    payment = message.successful_payment
+
+    payload = getattr(
+        payment,
+        "invoice_payload",
+        ""
+    )
+
+    if not payload.startswith("donate-"):
+        return
+
+    try:
+        amount = int(payload.replace("donate-", ""))
+    except ValueError:
+        return
+
+    user_id = message.from_user.id
+
+    print(
+        f"DONATION: user={user_id}, "
+        f"amount={amount} Stars"
+    )
+
+    bot.send_message(
+        message.chat.id,
+        "⭐ Спасибо за поддержку Anicards!\n\n"
+        f"Твой донат: {amount} Stars."
+    )
+
+@bot.callback_query_handler(
+    func=lambda q: q.data == "donate_menu"
+)
+def donate_menu_callback(query):
+    bot.answer_callback_query(query.id)
+
+    bot.send_message(
+        query.message.chat.id,
+        "⭐ Поддержать Anicards\n\n"
+        "Выбери количество Telegram Stars:",
+        reply_markup=donation_keyboard()
+    )
 
 # ============================================================
 # START
