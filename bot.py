@@ -6,7 +6,6 @@ from datetime import datetime, timedelta, timezone
 from flask import Flask
 from supabase import create_client
 from groq import Groq
-
 from unixgram import Bot
 
 
@@ -33,7 +32,7 @@ if not SUPABASE_KEY:
     raise RuntimeError("Не задан SUPABASE_KEY")
 
 
-MODEL = "llama-3.3-70b-versatile"
+MODEL = "openai/gpt-oss-120b"
 
 FREE_DAILY_TOKENS = 3000
 PLUS_DAILY_TOKENS = 15000
@@ -43,7 +42,6 @@ PLUS_DAYS = 30
 
 MAX_HISTORY = 5
 MAX_OUTPUT_TOKENS = 300
-
 MAX_WORKERS = 16
 
 
@@ -259,26 +257,8 @@ def get_plus_until(user_id):
     return user.get("plus_until")
 
 
-def is_plus(user_id):
-    plus_until = get_plus_until(user_id)
-
-    if not plus_until:
-        return False
-
-    try:
-        expires = datetime.fromisoformat(
-            plus_until.replace("Z", "+00:00")
-        )
-
-        return expires > datetime.now(timezone.utc)
-
-    except Exception:
-        return False
-
-
 def activate_plus(user_id):
     now = datetime.now(timezone.utc)
-
     old_until = get_plus_until(user_id)
 
     if old_until:
@@ -287,10 +267,7 @@ def activate_plus(user_id):
                 old_until.replace("Z", "+00:00")
             )
 
-            if old_date > now:
-                start = old_date
-            else:
-                start = now
+            start = old_date if old_date > now else now
 
         except Exception:
             start = now
@@ -387,15 +364,12 @@ def add_usage(user_id, tokens):
     with lock:
         usage = get_usage(user_id)
 
-        new_tokens = usage["tokens"] + tokens
-        new_requests = usage["requests"] + 1
-
         (
             supabase
             .table("usage")
             .update({
-                "tokens": new_tokens,
-                "requests": new_requests
+                "tokens": usage["tokens"] + tokens,
+                "requests": usage["requests"] + 1
             })
             .eq("user_id", user_id)
             .execute()
@@ -450,7 +424,6 @@ def get_global_stats():
         )
 
         total_users = len(users.data)
-
         now = datetime.now(timezone.utc)
 
         for user in users.data:
@@ -578,7 +551,7 @@ def run_background(function, *args):
 
 
 # ============================================================
-# /START
+# START
 # ============================================================
 
 @bot.message_handler(commands=["start"])
@@ -594,14 +567,14 @@ def start_worker(user_id):
 
     bot.send_message(
         user_id,
-        "привет. я Airi — ии за AniAI, меня создал Slip.\n\n"
-        "пиши что-нибудь.",
+        "привет, я Airi.\n\n"
+        "пиши.",
         reply_markup=MAIN_KEYBOARD
     )
 
 
 # ============================================================
-# /PROFILE
+# PROFILE
 # ============================================================
 
 @bot.message_handler(commands=["profile"])
@@ -620,6 +593,9 @@ def profile_worker(user_id):
 
     plus_until = user.get("plus_until") if user else None
 
+    plus = False
+    expires = None
+
     if plus_until:
         try:
             expires = datetime.fromisoformat(
@@ -629,41 +605,27 @@ def profile_worker(user_id):
             plus = expires > datetime.now(timezone.utc)
 
         except Exception:
-            plus = False
-    else:
-        plus = False
+            pass
 
     if plus:
         tariff = "⭐ AniAI+"
         limit = PLUS_DAILY_TOKENS
-
-        try:
-            expires_text = expires.strftime("%d.%m.%Y")
-        except Exception:
-            expires_text = "неизвестно"
-
     else:
         tariff = "Free"
         limit = FREE_DAILY_TOKENS
-        expires_text = None
 
     used = usage["tokens"]
-
-    remaining = max(
-        0,
-        limit - used
-    )
+    remaining = max(0, limit - used)
 
     text = (
-        "👤 Профиль\n\n"
-        f"Тариф: {tariff}\n"
-        f"Токены сегодня: {used:,} / {limit:,}\n"
-        f"Осталось: {remaining:,}\n"
-        f"Запросов сегодня: {usage['requests']}"
+        f"👤 {tariff}\n\n"
+        f"{used:,} / {limit:,} токенов\n"
+        f"{remaining:,} осталось\n\n"
+        f"{usage['requests']} запросов сегодня"
     )
 
-    if plus:
-        text += f"\nДо: {expires_text}"
+    if plus and expires:
+        text += f"\n\nдо {expires.strftime('%d.%m.%Y')}"
 
     bot.send_message(
         user_id,
@@ -673,7 +635,7 @@ def profile_worker(user_id):
 
 
 # ============================================================
-# /PLUS
+# PLUS
 # ============================================================
 
 @bot.message_handler(commands=["plus"])
@@ -698,11 +660,10 @@ def plus_worker(user_id):
             if expires > datetime.now(timezone.utc):
                 bot.send_message(
                     user_id,
-                    "у тебя уже есть AniAI+.\n\n"
-                    f"Действует до: {expires.strftime('%d.%m.%Y')}",
+                    "⭐ AniAI+ активен\n\n"
+                    f"до {expires.strftime('%d.%m.%Y')}",
                     reply_markup=MAIN_KEYBOARD
                 )
-
                 return
 
         except Exception:
@@ -711,7 +672,7 @@ def plus_worker(user_id):
     bot.send_invoice(
         user_id,
         "AniAI+",
-        "30 дней AniAI+ • увеличенный лимит токенов",
+        "30 дней AniAI+",
         payload=f"airi_plus_{user_id}",
         amount_stars=PLUS_PRICE
     )
@@ -734,7 +695,7 @@ def pre_checkout_worker(query):
         bot.answer_pre_checkout_query(
             query.id,
             ok=False,
-            error_message="Неизвестный платёж."
+            error_message="платёж не удалось обработать."
         )
         return
 
@@ -779,16 +740,14 @@ def successful_payment_worker(message):
 
     bot.send_message(
         user_id,
-        "оплата прошла.\n\n"
-        f"⭐ AniAI+ активирован на {PLUS_DAYS} дней.\n"
-        f"Лимит: {PLUS_DAILY_TOKENS:,} токенов в день.\n"
-        f"До: {plus_until.strftime('%d.%m.%Y')}",
+        "⭐ AniAI+ активирован\n\n"
+        f"до {plus_until.strftime('%d.%m.%Y')}",
         reply_markup=MAIN_KEYBOARD
     )
 
 
 # ============================================================
-# /STATS
+# STATS
 # ============================================================
 
 @bot.message_handler(commands=["stats"])
@@ -804,15 +763,15 @@ def stats_worker(user_id):
 
     bot.send_message(
         user_id,
-        "📊 Статистика AniAI\n\n"
-        f"Пользователей: {users}\n"
-        f"Всего AI-запросов: {requests}\n"
-        f"AniAI+ пользователей: {plus_users}"
+        "📊 статистика\n\n"
+        f"пользователей: {users}\n"
+        f"запросов: {requests}\n"
+        f"AniAI+: {plus_users}"
     )
 
 
 # ============================================================
-# /CLEAR
+# CLEAR
 # ============================================================
 
 @bot.message_handler(commands=["clear"])
@@ -834,7 +793,7 @@ def clear_worker(user_id):
 
 
 # ============================================================
-# /HELP
+# HELP
 # ============================================================
 
 @bot.message_handler(commands=["help"])
@@ -848,13 +807,11 @@ def help_command(message):
 def help_worker(user_id):
     bot.send_message(
         user_id,
-        "Команды:\n\n"
-        "/start — запустить бота\n"
-        "/profile — профиль и лимит\n"
+        "❓ помощь\n\n"
+        "/profile — профиль\n"
         "/plus — AniAI+\n"
         "/clear — очистить контекст\n"
-        "/stats — статистика\n"
-        "/help — помощь",
+        "/stats — статистика",
         reply_markup=MAIN_KEYBOARD
     )
 
@@ -905,9 +862,6 @@ def ai_chat(message):
 
 def ai_chat_worker(user_id, text):
 
-    # Один пользователь — один AI-запрос за раз.
-    # Разные пользователи работают одновременно.
-
     ai_lock = get_ai_lock(user_id)
 
     with ai_lock:
@@ -915,10 +869,11 @@ def ai_chat_worker(user_id, text):
         register_user(user_id)
 
         usage = get_usage(user_id)
-
         user = get_user(user_id)
 
         plus_until = user.get("plus_until") if user else None
+
+        user_plus = False
 
         if plus_until:
             try:
@@ -931,15 +886,13 @@ def ai_chat_worker(user_id, text):
                 )
 
             except Exception:
-                user_plus = False
+                pass
 
-        else:
-            user_plus = False
-
-        if user_plus:
-            daily_limit = PLUS_DAILY_TOKENS
-        else:
-            daily_limit = FREE_DAILY_TOKENS
+        daily_limit = (
+            PLUS_DAILY_TOKENS
+            if user_plus
+            else FREE_DAILY_TOKENS
+        )
 
         # ----------------------------------------------------
         # LIMIT
@@ -948,9 +901,8 @@ def ai_chat_worker(user_id, text):
         if usage["tokens"] >= daily_limit:
             bot.send_message(
                 user_id,
-                "лимит токенов на сегодня закончился.\n\n"
-                f"Твой лимит: {daily_limit:,} токенов.\n"
-                "можешь продолжить завтра или подключить AniAI+.",
+                "лимит на сегодня исчерпан.\n\n"
+                "завтра снова можно.",
                 reply_markup=MAIN_KEYBOARD
             )
             return
@@ -988,7 +940,7 @@ def ai_chat_worker(user_id, text):
             answer = completion.choices[0].message.content
 
             if not answer:
-                answer = "что-то я сейчас не смогла ответить."
+                answer = "не ответила."
 
         except Exception as e:
             print(
@@ -1010,8 +962,8 @@ def ai_chat_worker(user_id, text):
 
             bot.send_message(
                 user_id,
-                "у меня сейчас API отвалился. "
-                "попробуй ещё раз чуть позже.",
+                "не ответила.\n"
+                "попробуй ещё раз.",
                 reply_markup=MAIN_KEYBOARD
             )
 
@@ -1061,13 +1013,13 @@ def ai_chat_worker(user_id, text):
         )
 
         # ----------------------------------------------------
-        # GLOBAL STATS
+        # STATS
         # ----------------------------------------------------
 
         add_global_request()
 
         # ----------------------------------------------------
-        # SAVE ANSWER
+        # SAVE
         # ----------------------------------------------------
 
         add_history(
