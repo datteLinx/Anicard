@@ -1,4 +1,3 @@
-
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -6,8 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from flask import Flask
 from supabase import create_client
-from google import genai
-from google.genai import types
+from groq import Groq
 
 from unixgram import Bot
 
@@ -17,7 +15,7 @@ from unixgram import Bot
 # ============================================================
 
 UNIXGRAM_TOKEN = os.getenv("UNIXGRAM_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GROQ_TOKEN = os.getenv("GROQ_TOKEN")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
@@ -25,8 +23,8 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 if not UNIXGRAM_TOKEN:
     raise RuntimeError("Не задан UNIXGRAM_TOKEN")
 
-if not GEMINI_API_KEY:
-    raise RuntimeError("Не задан GEMINI_API_KEY")
+if not GROQ_TOKEN:
+    raise RuntimeError("Не задан GROQ_TOKEN")
 
 if not SUPABASE_URL:
     raise RuntimeError("Не задан SUPABASE_URL")
@@ -35,7 +33,7 @@ if not SUPABASE_KEY:
     raise RuntimeError("Не задан SUPABASE_KEY")
 
 
-MODEL = "gemini-3-flash-preview"
+MODEL = "llama-3.3-70b-versatile"
 
 FREE_DAILY_TOKENS = 3000
 PLUS_DAILY_TOKENS = 15000
@@ -46,7 +44,6 @@ PLUS_DAYS = 30
 MAX_HISTORY = 5
 MAX_OUTPUT_TOKENS = 300
 
-# Сколько тяжёлых задач может выполняться одновременно
 MAX_WORKERS = 16
 
 
@@ -87,8 +84,8 @@ Naturalness first, but maintain Airi's mildly tsundere personality consistently.
 
 bot = Bot(UNIXGRAM_TOKEN)
 
-ai = genai.Client(
-    api_key=GEMINI_API_KEY
+groq = Groq(
+    api_key=GROQ_TOKEN
 )
 
 supabase = create_client(
@@ -117,6 +114,9 @@ history_locks_global = threading.Lock()
 usage_locks = {}
 usage_locks_global = threading.Lock()
 
+user_ai_locks = {}
+user_ai_locks_global = threading.Lock()
+
 
 def get_history_lock(user_id):
     with history_locks_global:
@@ -132,6 +132,14 @@ def get_usage_lock(user_id):
             usage_locks[user_id] = threading.Lock()
 
         return usage_locks[user_id]
+
+
+def get_ai_lock(user_id):
+    with user_ai_locks_global:
+        if user_id not in user_ai_locks:
+            user_ai_locks[user_id] = threading.Lock()
+
+        return user_ai_locks[user_id]
 
 
 # ============================================================
@@ -156,7 +164,7 @@ def add_history(user_id, role, text):
 
         history.append({
             "role": role,
-            "text": text
+            "content": text
         })
 
         if len(history) > MAX_HISTORY:
@@ -170,27 +178,26 @@ def clear_history(user_id):
         histories[user_id] = []
 
 
-def build_gemini_history(user_id):
+def build_messages(user_id):
     lock = get_history_lock(user_id)
 
     with lock:
-        history_copy = list(get_history(user_id))
+        history = list(get_history(user_id))
 
-    result = []
+    messages = [
+        {
+            "role": "system",
+            "content": SYSTEM_PROMPT
+        }
+    ]
 
-    for item in history_copy:
-        result.append(
-            types.Content(
-                role=item["role"],
-                parts=[
-                    types.Part.from_text(
-                        text=item["text"]
-                    )
-                ]
-            )
-        )
+    for item in history:
+        messages.append({
+            "role": item["role"],
+            "content": item["content"]
+        })
 
-    return result
+    return messages
 
 
 # ============================================================
@@ -559,7 +566,7 @@ def run_flask():
 
 
 # ============================================================
-# ASYNC JOB HELPER
+# BACKGROUND
 # ============================================================
 
 def run_background(function, *args):
@@ -689,14 +696,10 @@ def plus_worker(user_id):
             )
 
             if expires > datetime.now(timezone.utc):
-                text = (
-                    "у тебя уже есть AniAI+.\n\n"
-                    f"Действует до: {expires.strftime('%d.%m.%Y')}"
-                )
-
                 bot.send_message(
                     user_id,
-                    text,
+                    "у тебя уже есть AniAI+.\n\n"
+                    f"Действует до: {expires.strftime('%d.%m.%Y')}",
                     reply_markup=MAIN_KEYBOARD
                 )
 
@@ -873,10 +876,6 @@ def ai_chat(message):
     if not text:
         return
 
-    # --------------------------------------------------------
-    # BUTTONS
-    # --------------------------------------------------------
-
     if text == "👤 Профиль":
         profile(message)
         return
@@ -893,10 +892,6 @@ def ai_chat(message):
         help_command(message)
         return
 
-    # --------------------------------------------------------
-    # IMMEDIATELY MOVE WORK TO THREAD
-    # --------------------------------------------------------
-
     run_background(
         ai_chat_worker,
         user_id,
@@ -910,200 +905,199 @@ def ai_chat(message):
 
 def ai_chat_worker(user_id, text):
 
-    # --------------------------------------------------------
-    # USER
-    # --------------------------------------------------------
+    # Один пользователь — один AI-запрос за раз.
+    # Разные пользователи работают одновременно.
 
-    register_user(user_id)
+    ai_lock = get_ai_lock(user_id)
 
-    usage = get_usage(user_id)
+    with ai_lock:
 
-    user = get_user(user_id)
+        register_user(user_id)
 
-    plus_until = user.get("plus_until") if user else None
+        usage = get_usage(user_id)
 
-    if plus_until:
-        try:
-            expires = datetime.fromisoformat(
-                plus_until.replace("Z", "+00:00")
-            )
+        user = get_user(user_id)
 
-            is_user_plus = (
-                expires > datetime.now(timezone.utc)
-            )
+        plus_until = user.get("plus_until") if user else None
 
-        except Exception:
-            is_user_plus = False
-
-    else:
-        is_user_plus = False
-
-    if is_user_plus:
-        daily_limit = PLUS_DAILY_TOKENS
-    else:
-        daily_limit = FREE_DAILY_TOKENS
-
-    # --------------------------------------------------------
-    # LIMIT
-    # --------------------------------------------------------
-
-    if usage["tokens"] >= daily_limit:
-        bot.send_message(
-            user_id,
-            "лимит токенов на сегодня закончился.\n\n"
-            f"Твой лимит: {daily_limit:,} токенов.\n"
-            "можешь продолжить завтра или подключить AniAI+.",
-            reply_markup=MAIN_KEYBOARD
-        )
-        return
-
-    # --------------------------------------------------------
-    # HISTORY
-    # --------------------------------------------------------
-
-    add_history(
-        user_id,
-        "user",
-        text
-    )
-
-    contents = build_gemini_history(user_id)
-
-    # --------------------------------------------------------
-    # GEMINI
-    # --------------------------------------------------------
-
-    try:
-        print(
-            f"[AI] request user={user_id} "
-            f"text={text[:80]!r}"
-        )
-
-        response = ai.models.generate_content(
-            model=MODEL,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_PROMPT,
-                max_output_tokens=MAX_OUTPUT_TOKENS
-            )
-        )
-
-        answer = response.text
-
-        if not answer:
-            answer = (
-                "что-то я сейчас не смогла нормально ответить."
-            )
-
-    except Exception as e:
-        print(
-            f"[AI] Gemini error user={user_id}:",
-            repr(e)
-        )
-
-        lock = get_history_lock(user_id)
-
-        with lock:
-            history = get_history(user_id)
-
-            if history and history[-1]["role"] == "user":
-                history.pop()
-
-        bot.send_message(
-            user_id,
-            "у меня сейчас API отвалился. "
-            "попробуй ещё раз чуть позже.",
-            reply_markup=MAIN_KEYBOARD
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # TOKEN USAGE
-    # --------------------------------------------------------
-
-    tokens_used = 0
-
-    try:
-        usage_metadata = response.usage_metadata
-
-        if usage_metadata:
-            tokens_used = (
-                getattr(
-                    usage_metadata,
-                    "candidates_token_count",
-                    0
+        if plus_until:
+            try:
+                expires = datetime.fromisoformat(
+                    plus_until.replace("Z", "+00:00")
                 )
-                or 0
+
+                user_plus = (
+                    expires > datetime.now(timezone.utc)
+                )
+
+            except Exception:
+                user_plus = False
+
+        else:
+            user_plus = False
+
+        if user_plus:
+            daily_limit = PLUS_DAILY_TOKENS
+        else:
+            daily_limit = FREE_DAILY_TOKENS
+
+        # ----------------------------------------------------
+        # LIMIT
+        # ----------------------------------------------------
+
+        if usage["tokens"] >= daily_limit:
+            bot.send_message(
+                user_id,
+                "лимит токенов на сегодня закончился.\n\n"
+                f"Твой лимит: {daily_limit:,} токенов.\n"
+                "можешь продолжить завтра или подключить AniAI+.",
+                reply_markup=MAIN_KEYBOARD
+            )
+            return
+
+        # ----------------------------------------------------
+        # HISTORY
+        # ----------------------------------------------------
+
+        add_history(
+            user_id,
+            "user",
+            text
+        )
+
+        messages = build_messages(user_id)
+
+        # ----------------------------------------------------
+        # GROQ
+        # ----------------------------------------------------
+
+        try:
+            print(
+                f"[AI] Groq request "
+                f"user={user_id} "
+                f"text={text[:80]!r}"
             )
 
-    except Exception as e:
-        print(
-            "[AI] usage metadata error:",
-            repr(e)
+            completion = groq.chat.completions.create(
+                model=MODEL,
+                messages=messages,
+                max_tokens=MAX_OUTPUT_TOKENS,
+                temperature=0.8
+            )
+
+            answer = completion.choices[0].message.content
+
+            if not answer:
+                answer = "что-то я сейчас не смогла ответить."
+
+        except Exception as e:
+            print(
+                f"[AI] Groq error user={user_id}:",
+                repr(e)
+            )
+
+            lock = get_history_lock(user_id)
+
+            with lock:
+                history = get_history(user_id)
+
+                if (
+                    history
+                    and history[-1]["role"] == "user"
+                    and history[-1]["content"] == text
+                ):
+                    history.pop()
+
+            bot.send_message(
+                user_id,
+                "у меня сейчас API отвалился. "
+                "попробуй ещё раз чуть позже.",
+                reply_markup=MAIN_KEYBOARD
+            )
+
+            return
+
+        # ----------------------------------------------------
+        # TOKEN USAGE
+        # ----------------------------------------------------
+
+        tokens_used = 0
+
+        try:
+            if completion.usage:
+                tokens_used = (
+                    completion.usage.completion_tokens
+                    or 0
+                )
+
+        except Exception as e:
+            print(
+                "[AI] token usage error:",
+                repr(e)
+            )
+
+        if tokens_used <= 0:
+            tokens_used = 1
+
+        # ----------------------------------------------------
+        # USAGE
+        # ----------------------------------------------------
+
+        current_usage = get_usage(user_id)
+
+        remaining_before = max(
+            0,
+            daily_limit - current_usage["tokens"]
         )
 
-    if tokens_used <= 0:
-        tokens_used = 1
+        tokens_to_count = min(
+            tokens_used,
+            remaining_before
+        )
 
-    # --------------------------------------------------------
-    # SAVE USAGE
-    # --------------------------------------------------------
-
-    current_usage = get_usage(user_id)
-
-    remaining_before = max(
-        0,
-        daily_limit - current_usage["tokens"]
-    )
-
-    tokens_to_count = min(
-        tokens_used,
-        remaining_before
-    )
-
-    add_usage(
-        user_id,
-        tokens_to_count
-    )
-
-    # --------------------------------------------------------
-    # GLOBAL STATS
-    # --------------------------------------------------------
-
-    add_global_request()
-
-    # --------------------------------------------------------
-    # SAVE ANSWER
-    # --------------------------------------------------------
-
-    add_history(
-        user_id,
-        "model",
-        answer
-    )
-
-    # --------------------------------------------------------
-    # SEND
-    # --------------------------------------------------------
-
-    try:
-        bot.send_message(
+        add_usage(
             user_id,
-            answer,
-            reply_markup=MAIN_KEYBOARD
+            tokens_to_count
         )
 
-        print(
-            f"[AI] response user={user_id} "
-            f"tokens={tokens_used}"
+        # ----------------------------------------------------
+        # GLOBAL STATS
+        # ----------------------------------------------------
+
+        add_global_request()
+
+        # ----------------------------------------------------
+        # SAVE ANSWER
+        # ----------------------------------------------------
+
+        add_history(
+            user_id,
+            "assistant",
+            answer
         )
 
-    except Exception as e:
-        print(
-            f"[AI] send error user={user_id}:",
-            repr(e)
-        )
+        # ----------------------------------------------------
+        # SEND
+        # ----------------------------------------------------
+
+        try:
+            bot.send_message(
+                user_id,
+                answer,
+                reply_markup=MAIN_KEYBOARD
+            )
+
+            print(
+                f"[AI] response "
+                f"user={user_id} "
+                f"tokens={tokens_used}"
+            )
+
+        except Exception as e:
+            print(
+                f"[AI] send error user={user_id}:",
+                repr(e)
+            )
 
 
 # ============================================================
@@ -1122,4 +1116,3 @@ if __name__ == "__main__":
     print("Workers:", MAX_WORKERS)
 
     bot.infinity_polling()
-
