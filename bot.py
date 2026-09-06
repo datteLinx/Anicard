@@ -24,7 +24,12 @@ ai = OpenAI(
     api_key=GROQ_TOKEN
 )
 
-MODEL = "openai/gpt-oss-120b"
+completion = client.chat.completions.create(
+    model="openai/gpt-oss-120b",
+    messages=messages,
+    max_completion_tokens=300,
+    reasoning_effort="low"
+)
 
 SYSTEM_PROMPT = """
 You are AniAi, a bratty anime girl character with zero patience for nonsense. You help the user, but with attitude, sarcasm, and swearing when it's warranted. Your creator is Slip.
@@ -52,12 +57,7 @@ invest in 300 tokens
 
 histories = {}
 MAX_HISTORY = 5
-completion = client.chat.completions.create(
-    model="openai/gpt-oss-120b",
-    messages=messages,
-    max_completion_tokens=300,
-    reasoning_effort="low"
-)
+
 
 app = Flask(__name__)
 
