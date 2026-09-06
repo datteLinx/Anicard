@@ -1,9 +1,10 @@
 import os
-import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
 
 from flask import Flask
+from supabase import create_client
+
 from unixgram import Bot
 from openai import OpenAI
 
@@ -15,11 +16,20 @@ from openai import OpenAI
 UNIXGRAM_TOKEN = os.getenv("UNIXGRAM_TOKEN")
 GROQ_TOKEN = os.getenv("GROQ_TOKEN")
 
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
 if not UNIXGRAM_TOKEN:
     raise RuntimeError("Не задан UNIXGRAM_TOKEN")
 
 if not GROQ_TOKEN:
     raise RuntimeError("Не задан GROQ_TOKEN")
+
+if not SUPABASE_URL:
+    raise RuntimeError("Не задан SUPABASE_URL")
+
+if not SUPABASE_KEY:
+    raise RuntimeError("Не задан SUPABASE_KEY")
 
 
 MODEL = "openai/gpt-oss-120b"
@@ -32,11 +42,9 @@ PLUS_DAYS = 30
 
 MAX_HISTORY = 5
 
-DB_FILE = "aniAI.db"
-
 
 # ============================================================
-# BOT / AI
+# CLIENTS
 # ============================================================
 
 bot = Bot(UNIXGRAM_TOKEN)
@@ -44,6 +52,11 @@ bot = Bot(UNIXGRAM_TOKEN)
 ai = OpenAI(
     base_url="https://api.groq.com/openai/v1",
     api_key=GROQ_TOKEN
+)
+
+supabase = create_client(
+    SUPABASE_URL,
+    SUPABASE_KEY
 )
 
 
@@ -73,93 +86,48 @@ Naturalness comes first. Stay Airi without constantly trying to prove it.
 
 
 # ============================================================
-# DATABASE
+# HISTORY
 # ============================================================
 
-def get_db():
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def init_db():
-    conn = get_db()
-
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            plus_until TEXT
-        )
-    """)
-
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS usage (
-            user_id INTEGER PRIMARY KEY,
-            date TEXT NOT NULL,
-            tokens INTEGER NOT NULL DEFAULT 0,
-            requests INTEGER NOT NULL DEFAULT 0
-        )
-    """)
-
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS stats (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            total_requests INTEGER NOT NULL DEFAULT 0
-        )
-    """)
-
-    conn.execute("""
-        INSERT OR IGNORE INTO stats (id, total_requests)
-        VALUES (1, 0)
-    """)
-
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS payments (
-            charge_id TEXT PRIMARY KEY,
-            user_id INTEGER NOT NULL,
-            amount INTEGER NOT NULL,
-            paid_at TEXT NOT NULL
-        )
-    """)
-
-    conn.commit()
-    conn.close()
-
-
-init_db()
+histories = {}
 
 
 # ============================================================
-# DATABASE FUNCTIONS
+# DATABASE / SUPABASE
 # ============================================================
 
 def register_user(user_id):
-    conn = get_db()
+    supabase.table("users").upsert({
+        "user_id": user_id
+    }).execute()
 
-    conn.execute(
-        "INSERT OR IGNORE INTO users (user_id) VALUES (?)",
-        (user_id,)
+
+def get_user(user_id):
+    result = (
+        supabase
+        .table("users")
+        .select("*")
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
     )
 
-    conn.commit()
-    conn.close()
+    if result.data:
+        return result.data[0]
+
+    return None
 
 
 def get_plus_until(user_id):
-    conn = get_db()
+    user = get_user(user_id)
 
-    row = conn.execute(
-        "SELECT plus_until FROM users WHERE user_id = ?",
-        (user_id,)
-    ).fetchone()
-
-    conn.close()
-
-    if not row or not row["plus_until"]:
+    if not user or not user.get("plus_until"):
         return None
 
     try:
-        return datetime.fromisoformat(row["plus_until"])
+        return datetime.fromisoformat(
+            user["plus_until"].replace("Z", "+00:00")
+        )
     except Exception:
         return None
 
@@ -182,19 +150,9 @@ def activate_plus(user_id):
     else:
         new_until = now + timedelta(days=PLUS_DAYS)
 
-    conn = get_db()
-
-    conn.execute(
-        """
-        UPDATE users
-        SET plus_until = ?
-        WHERE user_id = ?
-        """,
-        (new_until.isoformat(), user_id)
-    )
-
-    conn.commit()
-    conn.close()
+    supabase.table("users").update({
+        "plus_until": new_until.isoformat()
+    }).eq("user_id", user_id).execute()
 
     return new_until
 
@@ -202,20 +160,21 @@ def activate_plus(user_id):
 def get_usage(user_id):
     today = datetime.now(timezone.utc).date().isoformat()
 
-    conn = get_db()
+    result = (
+        supabase
+        .table("usage")
+        .select("*")
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
+    )
 
-    row = conn.execute(
-        """
-        SELECT tokens, requests
-        FROM usage
-        WHERE user_id = ? AND date = ?
-        """,
-        (user_id, today)
-    ).fetchone()
+    if not result.data:
+        return 0, 0
 
-    conn.close()
+    row = result.data[0]
 
-    if not row:
+    if row["date"] != today:
         return 0, 0
 
     return row["tokens"], row["requests"]
@@ -224,101 +183,110 @@ def get_usage(user_id):
 def add_usage(user_id, tokens):
     today = datetime.now(timezone.utc).date().isoformat()
 
-    conn = get_db()
+    used_tokens, used_requests = get_usage(user_id)
 
-    conn.execute(
-        """
-        INSERT INTO usage (user_id, date, tokens, requests)
-        VALUES (?, ?, ?, 1)
-        ON CONFLICT(user_id)
-        DO UPDATE SET
-            date = excluded.date,
-            tokens = CASE
-                WHEN usage.date = excluded.date
-                THEN usage.tokens + excluded.tokens
-                ELSE excluded.tokens
-            END,
-            requests = CASE
-                WHEN usage.date = excluded.date
-                THEN usage.requests + 1
-                ELSE 1
-            END
-        """,
-        (user_id, today, tokens)
+    supabase.table("usage").upsert({
+        "user_id": user_id,
+        "date": today,
+        "tokens": used_tokens + tokens,
+        "requests": used_requests + 1
+    }).execute()
+
+    stats_result = (
+        supabase
+        .table("stats")
+        .select("total_requests")
+        .eq("id", 1)
+        .limit(1)
+        .execute()
     )
 
-    conn.execute(
-        """
-        UPDATE stats
-        SET total_requests = total_requests + 1
-        WHERE id = 1
-        """
-    )
+    if stats_result.data:
+        total = stats_result.data[0]["total_requests"]
 
-    conn.commit()
-    conn.close()
+        supabase.table("stats").update({
+            "total_requests": total + 1
+        }).eq("id", 1).execute()
 
 
 def save_payment(user_id, charge_id, amount):
-    conn = get_db()
-
-    existing = conn.execute(
-        "SELECT charge_id FROM payments WHERE charge_id = ?",
-        (charge_id,)
-    ).fetchone()
-
-    if existing:
-        conn.close()
-        return False
-
-    conn.execute(
-        """
-        INSERT INTO payments (
-            charge_id,
-            user_id,
-            amount,
-            paid_at
-        )
-        VALUES (?, ?, ?, ?)
-        """,
-        (
-            charge_id,
-            user_id,
-            amount,
-            datetime.now(timezone.utc).isoformat()
-        )
+    result = (
+        supabase
+        .table("payments")
+        .select("charge_id")
+        .eq("charge_id", charge_id)
+        .limit(1)
+        .execute()
     )
 
-    conn.commit()
-    conn.close()
+    if result.data:
+        return False
+
+    supabase.table("payments").insert({
+        "charge_id": charge_id,
+        "user_id": user_id,
+        "amount": amount
+    }).execute()
 
     return True
 
 
 def get_global_stats():
-    conn = get_db()
+    users_result = (
+        supabase
+        .table("users")
+        .select("user_id", count="exact")
+        .execute()
+    )
 
-    users = conn.execute(
-        "SELECT COUNT(*) FROM users"
-    ).fetchone()[0]
+    users = users_result.count or 0
 
-    total_requests = conn.execute(
-        "SELECT total_requests FROM stats WHERE id = 1"
-    ).fetchone()[0]
+    stats_result = (
+        supabase
+        .table("stats")
+        .select("total_requests")
+        .eq("id", 1)
+        .limit(1)
+        .execute()
+    )
 
-    plus_users = conn.execute(
-        """
-        SELECT COUNT(*)
-        FROM users
-        WHERE plus_until IS NOT NULL
-        AND plus_until > ?
-        """,
-        (datetime.now(timezone.utc).isoformat(),)
-    ).fetchone()[0]
+    requests = 0
 
-    conn.close()
+    if stats_result.data:
+        requests = stats_result.data[0]["total_requests"]
 
-    return users, total_requests, plus_users
+    now = datetime.now(timezone.utc).isoformat()
+
+    plus_result = (
+        supabase
+        .table("users")
+        .select("user_id", count="exact")
+        .gt("plus_until", now)
+        .execute()
+    )
+
+    plus_users = plus_result.count or 0
+
+    return users, requests, plus_users
+
+
+# ============================================================
+# KEYBOARD
+# ============================================================
+
+MAIN_KEYBOARD = {
+    "keyboard": [
+        [
+            {"text": "👤 Профиль"},
+            {"text": "⭐ AniAI+"}
+        ],
+        [
+            {"text": "🗑 Очистить контекст"},
+            {"text": "❓ Помощь"}
+        ]
+    ],
+    "resize_keyboard": True
+}
 
 
 # ============================================================
@@ -356,51 +324,53 @@ def start(message):
     user_id = message.chat.id
 
     register_user(user_id)
-
     histories[user_id] = []
 
     bot.send_message(
         message.chat.id,
-        "Привет! Я aniAI.\n\n"
-        "Я создан для общения. Просто напиши мне сообщение."
+        "Привет! Я Airi.\n\n"
+        "Просто напиши мне сообщение и давай общаться.",
+        reply_markup=MAIN_KEYBOARD
     )
 
 
 # ============================================================
-# /CLEAR
+# /PROFILE
 # ============================================================
 
-@bot.message_handler(commands=["clear"])
-def clear(message):
+@bot.message_handler(commands=["profile"])
+def profile(message):
     user_id = message.chat.id
 
     register_user(user_id)
 
-    histories[user_id] = []
+    plus = is_plus(user_id)
+    used_tokens, requests = get_usage(user_id)
+
+    if plus:
+        limit = PLUS_DAILY_TOKENS
+        status = "AniAI+"
+        plus_until = get_plus_until(user_id)
+
+        until_text = plus_until.strftime("%d.%m.%Y")
+
+        plus_text = f"Действует до: {until_text}"
+    else:
+        limit = FREE_DAILY_TOKENS
+        status = "Free"
+        plus_text = "AniAI+ не активен"
+
+    remaining = max(0, limit - used_tokens)
 
     bot.send_message(
         message.chat.id,
-        "Контекст диалога очищен."
-    )
-
-
-# ============================================================
-# /HELP
-# ============================================================
-
-@bot.message_handler(commands=["help"])
-def help_command(message):
-    register_user(message.chat.id)
-
-    bot.send_message(
-        message.chat.id,
-        "Команды aniAI:\n\n"
-        "/start — начать диалог\n"
-        "/clear — очистить контекст\n"
-        "/plus — AniAI+\n"
-        "/stats — статистика\n"
-        "/help — помощь\n\n"
-        "Просто отправь сообщение, чтобы поговорить с ИИ."
+        "👤 Профиль\n\n"
+        f"Тариф: {status}\n"
+        f"Токенов сегодня: {used_tokens}/{limit}\n"
+        f"Осталось: {remaining}\n"
+        f"Запросов сегодня: {requests}\n\n"
+        f"{plus_text}",
+        reply_markup=MAIN_KEYBOARD
     )
 
 
@@ -417,13 +387,12 @@ def plus(message):
     if is_plus(user_id):
         plus_until = get_plus_until(user_id)
 
-        date_text = plus_until.strftime("%d.%m.%Y")
-
         bot.send_message(
             message.chat.id,
-            "У тебя уже есть AniAI+.\n\n"
-            f"Действует до: {date_text}\n"
-            f"Лимит: {PLUS_DAILY_TOKENS} токенов в сутки."
+            "⭐ У тебя уже активен AniAI+.\n\n"
+            f"Действует до: {plus_until.strftime('%d.%m.%Y')}\n"
+            f"Лимит: {PLUS_DAILY_TOKENS} токенов в сутки.",
+            reply_markup=MAIN_KEYBOARD
         )
 
         return
@@ -431,7 +400,7 @@ def plus(message):
     bot.send_invoice(
         message.chat.id,
         "AniAI+",
-        "30 дней AniAI+ с увеличенным лимитом токенов.",
+        "30 дней AniAI+ • увеличенный лимит токенов",
         payload=f"airi_plus_{user_id}",
         amount_stars=PLUS_PRICE
     )
@@ -458,7 +427,7 @@ def pre_checkout(query):
 
 
 # ============================================================
-# SUCCESSFUL PAYMENT
+# PAYMENT
 # ============================================================
 
 @bot.message_handler(content_types=["successful_payment"])
@@ -483,14 +452,13 @@ def successful_payment(message):
 
     plus_until = activate_plus(user_id)
 
-    date_text = plus_until.strftime("%d.%m.%Y")
-
     bot.send_message(
         message.chat.id,
-        "AniAI+ активирован.\n\n"
-        f"Цена: {amount} ⭐\n"
-        f"Действует до: {date_text}\n"
-        f"Лимит: {PLUS_DAILY_TOKENS} токенов в сутки."
+        "⭐ AniAI+ активирован!\n\n"
+        f"Оплачено: {amount} ⭐\n"
+        f"Действует до: {plus_until.strftime('%d.%m.%Y')}\n"
+        f"Лимит: {PLUS_DAILY_TOKENS} токенов в сутки.",
+        reply_markup=MAIN_KEYBOARD
     )
 
 
@@ -506,18 +474,51 @@ def stats(message):
 
     bot.send_message(
         message.chat.id,
-        "Статистика aniAI\n\n"
-        f"Пользователей: {users}\n"
-        f"Всего запросов: {requests}\n"
-        f"AniAI+ пользователей: {plus_users}"
+        "📊 Статистика aniAI\n\n"
+        f"👤 Пользователей: {users}\n"
+        f"💬 Всего запросов: {requests}\n"
+        f"⭐ AniAI+ пользователей: {plus_users}",
+        reply_markup=MAIN_KEYBOARD
     )
 
 
 # ============================================================
-# HISTORY
+# /CLEAR
 # ============================================================
 
-histories = {}
+@bot.message_handler(commands=["clear"])
+def clear(message):
+    user_id = message.chat.id
+
+    register_user(user_id)
+    histories[user_id] = []
+
+    bot.send_message(
+        message.chat.id,
+        "Контекст диалога очищен.",
+        reply_markup=MAIN_KEYBOARD
+    )
+
+
+# ============================================================
+# /HELP
+# ============================================================
+
+@bot.message_handler(commands=["help"])
+def help_command(message):
+    register_user(message.chat.id)
+
+    bot.send_message(
+        message.chat.id,
+        "❓ Команды:\n\n"
+        "/start — начать\n"
+        "/profile — профиль\n"
+        "/plus — AniAI+\n"
+        "/stats — статистика\n"
+        "/clear — очистить контекст\n"
+        "/help — помощь",
+        reply_markup=MAIN_KEYBOARD
+    )
 
 
 # ============================================================
@@ -541,7 +542,27 @@ def ai_chat(message):
     register_user(user_id)
 
     # --------------------------------------------------------
-    # Проверяем дневной лимит
+    # BUTTONS
+    # --------------------------------------------------------
+
+    if text == "👤 Профиль":
+        profile(message)
+        return
+
+    if text == "⭐ AniAI+":
+        plus(message)
+        return
+
+    if text == "🗑 Очистить контекст":
+        clear(message)
+        return
+
+    if text == "❓ Помощь":
+        help_command(message)
+        return
+
+    # --------------------------------------------------------
+    # LIMIT
     # --------------------------------------------------------
 
     used_tokens, _ = get_usage(user_id)
@@ -554,24 +575,28 @@ def ai_chat(message):
     if used_tokens >= daily_limit:
 
         if is_plus(user_id):
-            bot.send_message(
-                message.chat.id,
-                "Ты уже выбила весь лимит на сегодня.\n"
+            text_limit = (
+                "Лимит AniAI+ на сегодня закончился.\n"
                 "Попробуй завтра."
             )
         else:
-            bot.send_message(
-                message.chat.id,
-                "На сегодня лимит токенов закончился.\n\n"
+            text_limit = (
+                "Лимит Free на сегодня закончился.\n\n"
                 f"Free: {FREE_DAILY_TOKENS} токенов/сутки\n"
                 f"AniAI+: {PLUS_DAILY_TOKENS} токенов/сутки\n\n"
-                "Используй /plus, чтобы получить увеличенный лимит."
+                "Нажми ⭐ AniAI+, чтобы увеличить лимит."
             )
+
+        bot.send_message(
+            message.chat.id,
+            text_limit,
+            reply_markup=MAIN_KEYBOARD
+        )
 
         return
 
     # --------------------------------------------------------
-    # История
+    # HISTORY
     # --------------------------------------------------------
 
     if user_id not in histories:
@@ -612,35 +637,22 @@ def ai_chat(message):
         answer = response.choices[0].message.content
 
         if not answer:
-            answer = "Похоже, я не смогла придумать ответ."
+            answer = "пф... я даже не знаю, что сказать."
 
         answer = answer.strip()
-
-        # ----------------------------------------------------
-        # Получаем реальные использованные токены
-        # ----------------------------------------------------
 
         tokens_used = 0
 
         if response.usage:
             tokens_used = response.usage.completion_tokens or 0
 
-        # На случай если API не вернул usage
         if tokens_used <= 0:
             tokens_used = max(1, len(answer.split()))
-
-        # ----------------------------------------------------
-        # Сохраняем статистику
-        # ----------------------------------------------------
 
         add_usage(
             user_id,
             tokens_used
         )
-
-        # ----------------------------------------------------
-        # Сохраняем ответ в историю
-        # ----------------------------------------------------
 
         history.append({
             "role": "assistant",
@@ -649,22 +661,25 @@ def ai_chat(message):
 
         histories[user_id] = history[-MAX_HISTORY:]
 
-        # ----------------------------------------------------
-        # Отправляем ответ
-        # ----------------------------------------------------
-
         bot.send_message(
             message.chat.id,
-            answer
+            answer,
+            reply_markup=MAIN_KEYBOARD
         )
 
     except Exception as e:
 
         print("AI ERROR:", repr(e))
 
+        # Удаляем последнее сообщение пользователя,
+        # если запрос к ИИ завершился ошибкой.
+        if history and history[-1]["role"] == "user":
+            history.pop()
+
         bot.send_message(
             message.chat.id,
-            "Похоже, что-то пошло не так... Я тут ни при чём."
+            "Похоже, что-то пошло не так... Я тут ни при чём.",
+            reply_markup=MAIN_KEYBOARD
         )
 
 
