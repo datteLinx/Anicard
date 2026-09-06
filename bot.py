@@ -34,8 +34,8 @@ if not SUPABASE_KEY:
 
 MODEL = "openai/gpt-oss-120b"
 
-FREE_DAILY_TOKENS = 3000
-PLUS_DAILY_TOKENS = 15000
+FREE_DAILY_TOKENS = 1000
+PLUS_DAILY_TOKENS = 5000
 
 PLUS_PRICE = 99
 PLUS_DAYS = 30
@@ -637,9 +637,9 @@ def profile_worker(user_id):
 
     text = (
         f"👤 {tariff}\n\n"
-        f"{used:,} / {limit:,} токенов\n"
-        f"{remaining:,} осталось\n\n"
-        f"{usage['requests']} запросов сегодня"
+        f"{used:,} / {limit:,} Токенов\n"
+        f"{remaining:,} Осталось\n\n"
+        f"{usage['requests']} Запросов сегодня"
     )
 
     if plus and expires:
@@ -781,7 +781,7 @@ def stats_worker(user_id):
 
     bot.send_message(
         user_id,
-        "📊 статистика\n\n"
+        "📊 Статистика\n\n"
         f"пользователей: {users}\n"
         f"запросов: {requests}\n"
         f"AniAI+: {plus_users}"
@@ -825,7 +825,7 @@ def help_command(message):
 def help_worker(user_id):
     bot.send_message(
         user_id,
-        "❓ помощь\n\n"
+        "❓ Помощь\n\n"
         "/profile — профиль\n"
         "/plus — AniAI+\n"
         "/clear — очистить контекст\n"
@@ -920,7 +920,7 @@ def ai_chat_worker(user_id, text):
             bot.send_message(
                 user_id,
                 "лимит на сегодня исчерпан.\n\n"
-                "завтра снова можно.",
+                "Заходи завтра или покупай AniAi+.",
                 reply_markup=MAIN_KEYBOARD
             )
             return
