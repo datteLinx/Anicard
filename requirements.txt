@@ -1,4 +1,4 @@
 Flask
 unixgram-py
-google-genai
+groq
 supabase
