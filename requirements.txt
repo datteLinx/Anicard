@@ -1,4 +1,4 @@
-unixgram-py==1.0.0
-openai
 Flask
+unixgram-py
+google-genai
 supabase
