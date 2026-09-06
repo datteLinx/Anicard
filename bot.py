@@ -1,5 +1,7 @@
+
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 from flask import Flask
@@ -43,6 +45,9 @@ PLUS_DAYS = 30
 
 MAX_HISTORY = 5
 MAX_OUTPUT_TOKENS = 300
+
+# Сколько тяжёлых задач может выполняться одновременно
+MAX_WORKERS = 16
 
 
 # ============================================================
@@ -93,6 +98,43 @@ supabase = create_client(
 
 
 # ============================================================
+# THREAD POOL
+# ============================================================
+
+executor = ThreadPoolExecutor(
+    max_workers=MAX_WORKERS,
+    thread_name_prefix="aniai"
+)
+
+
+# ============================================================
+# LOCKS
+# ============================================================
+
+history_locks = {}
+history_locks_global = threading.Lock()
+
+usage_locks = {}
+usage_locks_global = threading.Lock()
+
+
+def get_history_lock(user_id):
+    with history_locks_global:
+        if user_id not in history_locks:
+            history_locks[user_id] = threading.Lock()
+
+        return history_locks[user_id]
+
+
+def get_usage_lock(user_id):
+    with usage_locks_global:
+        if user_id not in usage_locks:
+            usage_locks[user_id] = threading.Lock()
+
+        return usage_locks[user_id]
+
+
+# ============================================================
 # MEMORY
 # ============================================================
 
@@ -107,25 +149,36 @@ def get_history(user_id):
 
 
 def add_history(user_id, role, text):
-    history = get_history(user_id)
+    lock = get_history_lock(user_id)
 
-    history.append({
-        "role": role,
-        "text": text
-    })
+    with lock:
+        history = get_history(user_id)
 
-    if len(history) > MAX_HISTORY:
-        del history[:-MAX_HISTORY]
+        history.append({
+            "role": role,
+            "text": text
+        })
+
+        if len(history) > MAX_HISTORY:
+            del history[:-MAX_HISTORY]
 
 
 def clear_history(user_id):
-    histories[user_id] = []
+    lock = get_history_lock(user_id)
+
+    with lock:
+        histories[user_id] = []
 
 
 def build_gemini_history(user_id):
+    lock = get_history_lock(user_id)
+
+    with lock:
+        history_copy = list(get_history(user_id))
+
     result = []
 
-    for item in get_history(user_id):
+    for item in history_copy:
         result.append(
             types.Content(
                 role=item["role"],
@@ -151,6 +204,7 @@ def register_user(user_id):
             .table("users")
             .select("user_id")
             .eq("user_id", user_id)
+            .limit(1)
             .execute()
         )
 
@@ -166,7 +220,7 @@ def register_user(user_id):
             )
 
     except Exception as e:
-        print("register_user error:", e)
+        print("register_user error:", repr(e))
 
 
 def get_user(user_id):
@@ -184,7 +238,7 @@ def get_user(user_id):
             return result.data[0]
 
     except Exception as e:
-        print("get_user error:", e)
+        print("get_user error:", repr(e))
 
     return None
 
@@ -311,7 +365,7 @@ def get_usage(user_id):
         return row
 
     except Exception as e:
-        print("get_usage error:", e)
+        print("get_usage error:", repr(e))
 
         return {
             "date": today,
@@ -321,21 +375,24 @@ def get_usage(user_id):
 
 
 def add_usage(user_id, tokens):
-    usage = get_usage(user_id)
+    lock = get_usage_lock(user_id)
 
-    new_tokens = usage["tokens"] + tokens
-    new_requests = usage["requests"] + 1
+    with lock:
+        usage = get_usage(user_id)
 
-    (
-        supabase
-        .table("usage")
-        .update({
-            "tokens": new_tokens,
-            "requests": new_requests
-        })
-        .eq("user_id", user_id)
-        .execute()
-    )
+        new_tokens = usage["tokens"] + tokens
+        new_requests = usage["requests"] + 1
+
+        (
+            supabase
+            .table("usage")
+            .update({
+                "tokens": new_tokens,
+                "requests": new_requests
+            })
+            .eq("user_id", user_id)
+            .execute()
+        )
 
 
 # ============================================================
@@ -369,7 +426,7 @@ def add_global_request():
         )
 
     except Exception as e:
-        print("add_global_request error:", e)
+        print("add_global_request error:", repr(e))
 
 
 def get_global_stats():
@@ -417,7 +474,7 @@ def get_global_stats():
             total_requests = stats.data[0]["total_requests"]
 
     except Exception as e:
-        print("get_global_stats error:", e)
+        print("get_global_stats error:", repr(e))
 
     return total_users, total_requests, plus_users
 
@@ -454,7 +511,7 @@ def save_payment(user_id, charge_id, amount):
         return True
 
     except Exception as e:
-        print("save_payment error:", e)
+        print("save_payment error:", repr(e))
         return False
 
 
@@ -502,13 +559,30 @@ def run_flask():
 
 
 # ============================================================
+# ASYNC JOB HELPER
+# ============================================================
+
+def run_background(function, *args):
+    try:
+        executor.submit(function, *args)
+
+    except Exception as e:
+        print("background task error:", repr(e))
+
+
+# ============================================================
 # /START
 # ============================================================
 
 @bot.message_handler(commands=["start"])
 def start(message):
-    user_id = message.chat.id
+    run_background(
+        start_worker,
+        message.chat.id
+    )
 
+
+def start_worker(user_id):
     register_user(user_id)
 
     bot.send_message(
@@ -525,27 +599,39 @@ def start(message):
 
 @bot.message_handler(commands=["profile"])
 def profile(message):
-    user_id = message.chat.id
+    run_background(
+        profile_worker,
+        message.chat.id
+    )
 
+
+def profile_worker(user_id):
     register_user(user_id)
 
     usage = get_usage(user_id)
+    user = get_user(user_id)
 
-    plus = is_plus(user_id)
+    plus_until = user.get("plus_until") if user else None
 
-    if plus:
-        tariff = "⭐ AniAI+"
-        limit = PLUS_DAILY_TOKENS
-
-        plus_until = get_plus_until(user_id)
-
+    if plus_until:
         try:
             expires = datetime.fromisoformat(
                 plus_until.replace("Z", "+00:00")
             )
 
-            expires_text = expires.strftime("%d.%m.%Y")
+            plus = expires > datetime.now(timezone.utc)
 
+        except Exception:
+            plus = False
+    else:
+        plus = False
+
+    if plus:
+        tariff = "⭐ AniAI+"
+        limit = PLUS_DAILY_TOKENS
+
+        try:
+            expires_text = expires.strftime("%d.%m.%Y")
         except Exception:
             expires_text = "неизвестно"
 
@@ -555,7 +641,11 @@ def profile(message):
         expires_text = None
 
     used = usage["tokens"]
-    remaining = max(0, limit - used)
+
+    remaining = max(
+        0,
+        limit - used
+    )
 
     text = (
         "👤 Профиль\n\n"
@@ -581,32 +671,39 @@ def profile(message):
 
 @bot.message_handler(commands=["plus"])
 def plus(message):
-    user_id = message.chat.id
+    run_background(
+        plus_worker,
+        message.chat.id
+    )
 
+
+def plus_worker(user_id):
     register_user(user_id)
 
-    if is_plus(user_id):
-        until = get_plus_until(user_id)
+    until = get_plus_until(user_id)
 
+    if until:
         try:
             expires = datetime.fromisoformat(
                 until.replace("Z", "+00:00")
             )
 
-            text = (
-                "у тебя уже есть AniAI+.\n\n"
-                f"Действует до: {expires.strftime('%d.%m.%Y')}"
-            )
+            if expires > datetime.now(timezone.utc):
+                text = (
+                    "у тебя уже есть AniAI+.\n\n"
+                    f"Действует до: {expires.strftime('%d.%m.%Y')}"
+                )
+
+                bot.send_message(
+                    user_id,
+                    text,
+                    reply_markup=MAIN_KEYBOARD
+                )
+
+                return
 
         except Exception:
-            text = "у тебя уже активен AniAI+."
-
-        bot.send_message(
-            user_id,
-            text,
-            reply_markup=MAIN_KEYBOARD
-        )
-        return
+            pass
 
     bot.send_invoice(
         user_id,
@@ -623,6 +720,13 @@ def plus(message):
 
 @bot.pre_checkout_query_handler()
 def pre_checkout(query):
+    run_background(
+        pre_checkout_worker,
+        query
+    )
+
+
+def pre_checkout_worker(query):
     if not query.invoice_payload.startswith("airi_plus_"):
         bot.answer_pre_checkout_query(
             query.id,
@@ -643,6 +747,13 @@ def pre_checkout(query):
 
 @bot.message_handler(content_types=["successful_payment"])
 def successful_payment(message):
+    run_background(
+        successful_payment_worker,
+        message
+    )
+
+
+def successful_payment_worker(message):
     user_id = message.chat.id
 
     register_user(user_id)
@@ -679,10 +790,17 @@ def successful_payment(message):
 
 @bot.message_handler(commands=["stats"])
 def stats(message):
+    run_background(
+        stats_worker,
+        message.chat.id
+    )
+
+
+def stats_worker(user_id):
     users, requests, plus_users = get_global_stats()
 
     bot.send_message(
-        message.chat.id,
+        user_id,
         "📊 Статистика AniAI\n\n"
         f"Пользователей: {users}\n"
         f"Всего AI-запросов: {requests}\n"
@@ -696,8 +814,13 @@ def stats(message):
 
 @bot.message_handler(commands=["clear"])
 def clear(message):
-    user_id = message.chat.id
+    run_background(
+        clear_worker,
+        message.chat.id
+    )
 
+
+def clear_worker(user_id):
     clear_history(user_id)
 
     bot.send_message(
@@ -713,8 +836,15 @@ def clear(message):
 
 @bot.message_handler(commands=["help"])
 def help_command(message):
+    run_background(
+        help_worker,
+        message.chat.id
+    )
+
+
+def help_worker(user_id):
     bot.send_message(
-        message.chat.id,
+        user_id,
         "Команды:\n\n"
         "/start — запустить бота\n"
         "/profile — профиль и лимит\n"
@@ -733,7 +863,12 @@ def help_command(message):
 @bot.message_handler(content_types=["text"])
 def ai_chat(message):
     user_id = message.chat.id
-    text = message.text.strip()
+    text = message.text
+
+    if not text:
+        return
+
+    text = text.strip()
 
     if not text:
         return
@@ -759,6 +894,23 @@ def ai_chat(message):
         return
 
     # --------------------------------------------------------
+    # IMMEDIATELY MOVE WORK TO THREAD
+    # --------------------------------------------------------
+
+    run_background(
+        ai_chat_worker,
+        user_id,
+        text
+    )
+
+
+# ============================================================
+# AI WORKER
+# ============================================================
+
+def ai_chat_worker(user_id, text):
+
+    # --------------------------------------------------------
     # USER
     # --------------------------------------------------------
 
@@ -766,10 +918,34 @@ def ai_chat(message):
 
     usage = get_usage(user_id)
 
-    if is_plus(user_id):
+    user = get_user(user_id)
+
+    plus_until = user.get("plus_until") if user else None
+
+    if plus_until:
+        try:
+            expires = datetime.fromisoformat(
+                plus_until.replace("Z", "+00:00")
+            )
+
+            is_user_plus = (
+                expires > datetime.now(timezone.utc)
+            )
+
+        except Exception:
+            is_user_plus = False
+
+    else:
+        is_user_plus = False
+
+    if is_user_plus:
         daily_limit = PLUS_DAILY_TOKENS
     else:
         daily_limit = FREE_DAILY_TOKENS
+
+    # --------------------------------------------------------
+    # LIMIT
+    # --------------------------------------------------------
 
     if usage["tokens"] >= daily_limit:
         bot.send_message(
@@ -798,6 +974,11 @@ def ai_chat(message):
     # --------------------------------------------------------
 
     try:
+        print(
+            f"[AI] request user={user_id} "
+            f"text={text[:80]!r}"
+        )
+
         response = ai.models.generate_content(
             model=MODEL,
             contents=contents,
@@ -810,21 +991,31 @@ def ai_chat(message):
         answer = response.text
 
         if not answer:
-            answer = "что-то я сейчас не смогла нормально ответить."
+            answer = (
+                "что-то я сейчас не смогла нормально ответить."
+            )
 
     except Exception as e:
-        print("Gemini error:", repr(e))
+        print(
+            f"[AI] Gemini error user={user_id}:",
+            repr(e)
+        )
 
-        history = get_history(user_id)
+        lock = get_history_lock(user_id)
 
-        if history and history[-1]["role"] == "user":
-            history.pop()
+        with lock:
+            history = get_history(user_id)
+
+            if history and history[-1]["role"] == "user":
+                history.pop()
 
         bot.send_message(
             user_id,
-            "у меня сейчас API отвалился. попробуй ещё раз чуть позже.",
+            "у меня сейчас API отвалился. "
+            "попробуй ещё раз чуть позже.",
             reply_markup=MAIN_KEYBOARD
         )
+
         return
 
     # --------------------------------------------------------
@@ -847,10 +1038,17 @@ def ai_chat(message):
             )
 
     except Exception as e:
-        print("usage metadata error:", e)
+        print(
+            "[AI] usage metadata error:",
+            repr(e)
+        )
 
     if tokens_used <= 0:
         tokens_used = 1
+
+    # --------------------------------------------------------
+    # SAVE USAGE
+    # --------------------------------------------------------
 
     current_usage = get_usage(user_id)
 
@@ -869,6 +1067,10 @@ def ai_chat(message):
         tokens_to_count
     )
 
+    # --------------------------------------------------------
+    # GLOBAL STATS
+    # --------------------------------------------------------
+
     add_global_request()
 
     # --------------------------------------------------------
@@ -885,11 +1087,23 @@ def ai_chat(message):
     # SEND
     # --------------------------------------------------------
 
-    bot.send_message(
-        user_id,
-        answer,
-        reply_markup=MAIN_KEYBOARD
-    )
+    try:
+        bot.send_message(
+            user_id,
+            answer,
+            reply_markup=MAIN_KEYBOARD
+        )
+
+        print(
+            f"[AI] response user={user_id} "
+            f"tokens={tokens_used}"
+        )
+
+    except Exception as e:
+        print(
+            f"[AI] send error user={user_id}:",
+            repr(e)
+        )
 
 
 # ============================================================
@@ -897,6 +1111,7 @@ def ai_chat(message):
 # ============================================================
 
 if __name__ == "__main__":
+
     threading.Thread(
         target=run_flask,
         daemon=True
@@ -904,5 +1119,7 @@ if __name__ == "__main__":
 
     print("AniAI started")
     print("Model:", MODEL)
+    print("Workers:", MAX_WORKERS)
 
     bot.infinity_polling()
+
