@@ -52,7 +52,12 @@ invest in 300 tokens
 
 histories = {}
 MAX_HISTORY = 5
-
+completion = client.chat.completions.create(
+    model="openai/gpt-oss-120b",
+    messages=messages,
+    max_completion_tokens=300,
+    reasoning_effort="low"
+)
 
 app = Flask(__name__)
 
