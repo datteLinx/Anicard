@@ -585,8 +585,8 @@ def start_worker(user_id):
 
     bot.send_message(
         user_id,
-        "привет, я Airi.\n\n"
-        "пиши.",
+        "Привет, я AniAi.\n\n"
+        "Пиши свой запрос - отвечу на него.",
         reply_markup=MAIN_KEYBOARD
     )
 
