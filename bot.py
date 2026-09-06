@@ -269,17 +269,18 @@ def get_usage(user_id):
             .execute()
         )
 
-        if not result.data:
-            (
-                supabase
-                .table("usage")
-                .insert({
-                    "user_id": user_id,
-                    "date": today,
-                    "tokens": 0,
-                    "requests": 0
-                })
-                .execute()
+      if not result.data:
+    (
+        supabase
+        .table("usage")
+        .insert({
+            "user_id": user_id,
+            "date": today,
+            "tokens": 0,
+            "requests": 0
+        })
+        .execute()
+    )
 
             return {
                 "date": today,
