@@ -43,7 +43,8 @@ def is_admin(user_id):
     return user_id in ADMIN_IDS
 
 
-MODEL = "openai/gpt-oss-120b"
+FREE_MODEL = "openai/gpt-oss-20b"
+PLUS_MODEL = "openai/gpt-oss-120b"
 
 FREE_DAILY_TOKENS = 1000
 PLUS_DAILY_TOKENS = 5000
@@ -51,8 +52,12 @@ PLUS_DAILY_TOKENS = 5000
 PLUS_PRICE = 99
 PLUS_DAYS = 30
 
-MAX_HISTORY = 5
-MAX_OUTPUT_TOKENS = 300
+FREE_MAX_HISTORY = 5
+PLUS_MAX_HISTORY = 10
+
+FREE_MAX_OUTPUT_TOKENS = 300
+PLUS_MAX_OUTPUT_TOKENS = 500
+
 MAX_WORKERS = 16
 
 PAYLOAD_PREFIX = "airi_plus_"
@@ -163,17 +168,6 @@ admin_discount_lock = threading.Lock()
 
 
 def cancel_admin_waiting(user_id):
-    """
-    Сбрасывает оба режима ожидания ввода у админа.
-
-    БАГ В ОРИГИНАЛЕ: если админ нажимал /discount (или кнопку "Скидка"),
-    а затем вместо ввода числа отправлял любую другую команду или кнопку
-    меню, флаг admin_discount_waiting/admin_broadcast_waiting оставался
-    висеть навсегда. Follow-up обычное сообщение админа (например ответ
-    в чате с пользователем поддержки) могло по ошибке улететь как
-    рассылка ВСЕМ пользователям бота. Вызываем это при любом переходе
-    в другое действие.
-    """
     with admin_discount_lock:
         admin_discount_waiting.discard(user_id)
 
@@ -191,7 +185,7 @@ def get_history(user_id):
     return histories[user_id]
 
 
-def add_history(user_id, role, text):
+def add_history(user_id, role, text, max_history):
     lock = get_history_lock(user_id)
 
     with lock:
@@ -202,8 +196,8 @@ def add_history(user_id, role, text):
             "content": text
         })
 
-        if len(history) > MAX_HISTORY:
-            del history[:-MAX_HISTORY]
+        if len(history) > max_history:
+            del history[:-max_history]
 
 
 def clear_history(user_id):
@@ -213,11 +207,13 @@ def clear_history(user_id):
         histories[user_id] = []
 
 
-def build_messages(user_id):
+def build_messages(user_id, max_history):
     lock = get_history_lock(user_id)
 
     with lock:
         history = list(get_history(user_id))
+
+    history = history[-max_history:]
 
     messages = [
         {
@@ -644,18 +640,6 @@ def save_payment(user_id, charge_id, amount):
 
 
 def parse_plus_payload(payload):
-    """
-    Разбирает payload вида "airi_plus_{user_id}_{price}" и возвращает
-    (user_id, price) или (None, None), если payload некорректен.
-
-    ИСПРАВЛЕНИЕ: раньше payload был просто "airi_plus_{user_id}" и цена
-    нигде не фиксировалась — на pre_checkout цена пересчитывалась заново
-    через get_plus_price(). Если админ менял скидку в промежутке между
-    отправкой инвойса и оплатой, легитимный платёж на старую цену либо
-    ошибочно отклонялся, либо (что хуже) принимался по "неправильной"
-    пересчитанной цене. Теперь цена жёстко зашивается в payload в момент
-    создания инвойса и именно с ней сверяется фактическая сумма платежа.
-    """
     if not payload or not payload.startswith(PAYLOAD_PREFIX):
         return None, None
 
@@ -873,7 +857,7 @@ def profile_worker(user_id):
         user_id,
         text,
         reply_markup=MAIN_KEYBOARD
-        )
+    )
 
 
 @bot.message_handler(
@@ -929,8 +913,6 @@ def plus_worker(user_id):
     discount = get_discount()
     price = get_plus_price()
 
-    # Цена фиксируется в payload на момент выставления счёта — см.
-    # parse_plus_payload().
     payload = f"{PAYLOAD_PREFIX}{user_id}_{price}"
 
     if discount > 0:
@@ -1003,14 +985,16 @@ def pre_checkout(query):
 
             return
 
-        # ИСПРАВЛЕНИЕ: защита от "переслал счёт другому человеку".
-        # Если библиотека сообщает, кто именно подтверждает оплату,
-        # сверяем это с пользователем, для которого создавался инвойс.
         payer = (
             getattr(query, "from_user", None)
             or getattr(query, "from", None)
         )
-        payer_id = getattr(payer, "id", None) if payer is not None else None
+
+        payer_id = (
+            getattr(payer, "id", None)
+            if payer is not None
+            else None
+        )
 
         if payer_id is not None and int(payer_id) != user_id:
             print(
@@ -1033,9 +1017,6 @@ def pre_checkout(query):
             None
         )
 
-        # ИСПРАВЛЕНИЕ: раньше при received_amount is None проверка суммы
-        # просто пропускалась и платёж на ЛЮБУЮ сумму подтверждался.
-        # Теперь при невозможности проверить сумму платёж отклоняется.
         if received_amount is None:
             print(
                 f"[PAYMENT] missing total_amount "
@@ -1082,10 +1063,6 @@ def pre_checkout(query):
             repr(e)
         )
 
-        # ИСПРАВЛЕНИЕ: раньше при исключении ответ вообще не отправлялся.
-        # По документации библиотеки на pre_checkout нужно ответить за 10
-        # секунд, иначе платёж отменяется сам — но лучше явно отклонить,
-        # чем оставить пользователя с крутилкой и получить рассинхрон.
         try:
             bot.answer_pre_checkout_query(
                 query_id,
@@ -1179,10 +1156,6 @@ def successful_payment_worker(message):
 
         return
 
-    # ИСПРАВЛЕНИЕ: раньше проверка payload полностью пропускалась, если
-    # payload был пустым ("if payload:"). Теперь payload обязателен и
-    # строго сверяется и по пользователю, и по зафиксированной цене —
-    # это вторая линия защиты в дополнение к pre_checkout.
     payload_user_id, payload_price = parse_plus_payload(payload)
 
     if payload_user_id is None:
@@ -1747,14 +1720,20 @@ def ai_chat_worker(user_id, text):
             except Exception:
                 pass
 
+        if user_plus:
+            model = PLUS_MODEL
+            daily_limit = PLUS_DAILY_TOKENS
+            max_history = PLUS_MAX_HISTORY
+            max_output_tokens = PLUS_MAX_OUTPUT_TOKENS
+
+        else:
+            model = FREE_MODEL
+            daily_limit = FREE_DAILY_TOKENS
+            max_history = FREE_MAX_HISTORY
+            max_output_tokens = FREE_MAX_OUTPUT_TOKENS
+
         if is_admin(user_id):
             daily_limit = float("inf")
-        else:
-            daily_limit = (
-                PLUS_DAILY_TOKENS
-                if user_plus
-                else FREE_DAILY_TOKENS
-            )
 
         if (
             not is_admin(user_id)
@@ -1772,25 +1751,31 @@ def ai_chat_worker(user_id, text):
         add_history(
             user_id,
             "user",
-            text
+            text,
+            max_history
         )
 
         messages = build_messages(
-            user_id
+            user_id,
+            max_history
         )
 
         try:
             print(
                 "[AI] Groq request "
                 f"user={user_id} "
+                f"model={model} "
+                f"plus={user_plus} "
+                f"history={max_history} "
+                f"max_output={max_output_tokens} "
                 f"text={text[:80]!r}"
             )
 
             completion = (
                 groq.chat.completions.create(
-                    model=MODEL,
+                    model=model,
                     messages=messages,
-                    max_tokens=MAX_OUTPUT_TOKENS,
+                    max_completion_tokens=max_output_tokens,
                     temperature=0.8
                 )
             )
@@ -1865,6 +1850,7 @@ def ai_chat_worker(user_id, text):
 
         if is_admin(user_id):
             tokens_to_count = tokens_used
+
         else:
             remaining_before = max(
                 0,
@@ -1887,7 +1873,8 @@ def ai_chat_worker(user_id, text):
         add_history(
             user_id,
             "assistant",
-            answer
+            answer,
+            max_history
         )
 
         try:
@@ -1904,6 +1891,7 @@ def ai_chat_worker(user_id, text):
             print(
                 "[AI] response "
                 f"user={user_id} "
+                f"model={model} "
                 f"tokens={tokens_used}"
             )
 
@@ -1922,13 +1910,13 @@ if __name__ == "__main__":
     ).start()
 
     print("AniAI started")
-    print("Model:", MODEL)
+    print("Free model:", FREE_MODEL)
+    print("Plus model:", PLUS_MODEL)
+    print("Free history:", FREE_MAX_HISTORY)
+    print("Plus history:", PLUS_MAX_HISTORY)
+    print("Free max output:", FREE_MAX_OUTPUT_TOKENS)
+    print("Plus max output:", PLUS_MAX_OUTPUT_TOKENS)
     print("Workers:", MAX_WORKERS)
     print("Admins:", list(ADMIN_IDS))
 
-    # ИСПРАВЛЕНИЕ: у unixgram-py нет метода infinity_polling() — это
-    # метод из pyTelegramBotAPI. В unixgram-py long-poll запускается
-    # через polling(). С infinity_polling() бот падал бы с
-    # AttributeError сразу при старте и вообще не работал бы, несмотря
-    # на то что Flask-заглушка /health продолжала бы отвечать "OK".
     bot.polling()
