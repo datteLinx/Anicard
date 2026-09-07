@@ -55,6 +55,8 @@ MAX_HISTORY = 5
 MAX_OUTPUT_TOKENS = 300
 MAX_WORKERS = 16
 
+PAYLOAD_PREFIX = "airi_plus_"
+
 
 SYSTEM_PROMPT = """
 You are AniAI AIRY, an AI created by Slip.
@@ -158,6 +160,25 @@ admin_discount_waiting = set()
 
 admin_broadcast_lock = threading.Lock()
 admin_discount_lock = threading.Lock()
+
+
+def cancel_admin_waiting(user_id):
+    """
+    Сбрасывает оба режима ожидания ввода у админа.
+
+    БАГ В ОРИГИНАЛЕ: если админ нажимал /discount (или кнопку "Скидка"),
+    а затем вместо ввода числа отправлял любую другую команду или кнопку
+    меню, флаг admin_discount_waiting/admin_broadcast_waiting оставался
+    висеть навсегда. Follow-up обычное сообщение админа (например ответ
+    в чате с пользователем поддержки) могло по ошибке улететь как
+    рассылка ВСЕМ пользователям бота. Вызываем это при любом переходе
+    в другое действие.
+    """
+    with admin_discount_lock:
+        admin_discount_waiting.discard(user_id)
+
+    with admin_broadcast_lock:
+        admin_broadcast_waiting.discard(user_id)
 
 
 histories = {}
@@ -622,6 +643,34 @@ def save_payment(user_id, charge_id, amount):
         return "error"
 
 
+def parse_plus_payload(payload):
+    """
+    Разбирает payload вида "airi_plus_{user_id}_{price}" и возвращает
+    (user_id, price) или (None, None), если payload некорректен.
+
+    ИСПРАВЛЕНИЕ: раньше payload был просто "airi_plus_{user_id}" и цена
+    нигде не фиксировалась — на pre_checkout цена пересчитывалась заново
+    через get_plus_price(). Если админ менял скидку в промежутке между
+    отправкой инвойса и оплатой, легитимный платёж на старую цену либо
+    ошибочно отклонялся, либо (что хуже) принимался по "неправильной"
+    пересчитанной цене. Теперь цена жёстко зашивается в payload в момент
+    создания инвойса и именно с ней сверяется фактическая сумма платежа.
+    """
+    if not payload or not payload.startswith(PAYLOAD_PREFIX):
+        return None, None
+
+    remainder = payload[len(PAYLOAD_PREFIX):]
+    user_id_str, _, price_str = remainder.rpartition("_")
+
+    if not user_id_str or not price_str:
+        return None, None
+
+    try:
+        return int(user_id_str), int(price_str)
+    except (TypeError, ValueError):
+        return None, None
+
+
 MAIN_KEYBOARD = {
     "keyboard": [
         [
@@ -723,6 +772,8 @@ def start(message):
 
 
 def start_worker(user_id):
+    cancel_admin_waiting(user_id)
+
     register_user(user_id)
 
     bot.send_message(
@@ -744,6 +795,8 @@ def profile(message):
 
 
 def profile_worker(user_id):
+    cancel_admin_waiting(user_id)
+
     register_user(user_id)
 
     usage = get_usage(user_id)
@@ -834,6 +887,8 @@ def plus(message):
 
 
 def plus_worker(user_id):
+    cancel_admin_waiting(user_id)
+
     register_user(user_id)
 
     until = get_plus_until(
@@ -874,6 +929,10 @@ def plus_worker(user_id):
     discount = get_discount()
     price = get_plus_price()
 
+    # Цена фиксируется в payload на момент выставления счёта — см.
+    # parse_plus_payload().
+    payload = f"{PAYLOAD_PREFIX}{user_id}_{price}"
+
     if discount > 0:
         text = (
             "⭐ AniAI+\n\n"
@@ -894,7 +953,7 @@ def plus_worker(user_id):
             user_id,
             "AniAI+",
             "30 дней AniAI+",
-            payload=f"airi_plus_{user_id}",
+            payload=payload,
             amount_stars=price
         )
 
@@ -922,47 +981,51 @@ def plus_worker(user_id):
 
 @bot.pre_checkout_query_handler()
 def pre_checkout(query):
+    query_id = getattr(query, "id", None)
+
     try:
-        payload = getattr(
-            query,
-            "invoice_payload",
-            ""
-        )
+        payload = getattr(query, "invoice_payload", "") or ""
 
         print(
             f"[PAYMENT] pre_checkout "
-            f"id={getattr(query, 'id', None)} "
+            f"id={query_id} "
             f"payload={payload!r}"
         )
 
-        if not payload.startswith(
-            "airi_plus_"
-        ):
+        user_id, invoiced_price = parse_plus_payload(payload)
+
+        if user_id is None:
             bot.answer_pre_checkout_query(
-                query.id,
+                query_id,
                 ok=False,
                 error_message="неверный платёж."
             )
 
             return
 
-        try:
-            user_id = int(
-                payload.split(
-                    "airi_plus_",
-                    1
-                )[1]
+        # ИСПРАВЛЕНИЕ: защита от "переслал счёт другому человеку".
+        # Если библиотека сообщает, кто именно подтверждает оплату,
+        # сверяем это с пользователем, для которого создавался инвойс.
+        payer = (
+            getattr(query, "from_user", None)
+            or getattr(query, "from", None)
+        )
+        payer_id = getattr(payer, "id", None) if payer is not None else None
+
+        if payer_id is not None and int(payer_id) != user_id:
+            print(
+                f"[PAYMENT] payer mismatch "
+                f"payload_user={user_id} "
+                f"payer={payer_id}"
             )
-        except Exception:
+
             bot.answer_pre_checkout_query(
-                query.id,
+                query_id,
                 ok=False,
                 error_message="неверный платёж."
             )
 
             return
-
-        expected_price = get_plus_price()
 
         received_amount = getattr(
             query,
@@ -970,20 +1033,33 @@ def pre_checkout(query):
             None
         )
 
-        if (
-            received_amount is not None
-            and int(received_amount)
-            != int(expected_price)
-        ):
+        # ИСПРАВЛЕНИЕ: раньше при received_amount is None проверка суммы
+        # просто пропускалась и платёж на ЛЮБУЮ сумму подтверждался.
+        # Теперь при невозможности проверить сумму платёж отклоняется.
+        if received_amount is None:
+            print(
+                f"[PAYMENT] missing total_amount "
+                f"user={user_id}"
+            )
+
+            bot.answer_pre_checkout_query(
+                query_id,
+                ok=False,
+                error_message="не удалось проверить сумму платежа."
+            )
+
+            return
+
+        if int(received_amount) != invoiced_price:
             print(
                 f"[PAYMENT] wrong amount "
                 f"user={user_id} "
                 f"received={received_amount} "
-                f"expected={expected_price}"
+                f"expected={invoiced_price}"
             )
 
             bot.answer_pre_checkout_query(
-                query.id,
+                query_id,
                 ok=False,
                 error_message="неверная сумма платежа."
             )
@@ -991,7 +1067,7 @@ def pre_checkout(query):
             return
 
         bot.answer_pre_checkout_query(
-            query.id,
+            query_id,
             ok=True
         )
 
@@ -1005,6 +1081,19 @@ def pre_checkout(query):
             "[PAYMENT] pre_checkout error:",
             repr(e)
         )
+
+        # ИСПРАВЛЕНИЕ: раньше при исключении ответ вообще не отправлялся.
+        # По документации библиотеки на pre_checkout нужно ответить за 10
+        # секунд, иначе платёж отменяется сам — но лучше явно отклонить,
+        # чем оставить пользователя с крутилкой и получить рассинхрон.
+        try:
+            bot.answer_pre_checkout_query(
+                query_id,
+                ok=False,
+                error_message="ошибка обработки платежа."
+            )
+        except Exception:
+            pass
 
 
 @bot.message_handler(
@@ -1072,7 +1161,7 @@ def successful_payment_worker(message):
         payment,
         "invoice_payload",
         ""
-    )
+    ) or ""
 
     print(
         f"[PAYMENT] details "
@@ -1090,18 +1179,39 @@ def successful_payment_worker(message):
 
         return
 
-    if payload:
-        expected_payload = f"airi_plus_{user_id}"
+    # ИСПРАВЛЕНИЕ: раньше проверка payload полностью пропускалась, если
+    # payload был пустым ("if payload:"). Теперь payload обязателен и
+    # строго сверяется и по пользователю, и по зафиксированной цене —
+    # это вторая линия защиты в дополнение к pre_checkout.
+    payload_user_id, payload_price = parse_plus_payload(payload)
 
-        if payload != expected_payload:
-            print(
-                f"[PAYMENT] wrong payload "
-                f"user={user_id} "
-                f"received={payload!r} "
-                f"expected={expected_payload!r}"
-            )
+    if payload_user_id is None:
+        print(
+            f"[PAYMENT] unrecognized/missing payload "
+            f"user={user_id} "
+            f"payload={payload!r}"
+        )
 
-            return
+        return
+
+    if payload_user_id != user_id:
+        print(
+            f"[PAYMENT] payload/user mismatch "
+            f"user={user_id} "
+            f"payload_user={payload_user_id}"
+        )
+
+        return
+
+    if amount is not None and int(amount) != payload_price:
+        print(
+            f"[PAYMENT] amount/payload mismatch "
+            f"user={user_id} "
+            f"amount={amount} "
+            f"payload_price={payload_price}"
+        )
+
+        return
 
     register_user(user_id)
 
@@ -1175,6 +1285,8 @@ def stats(message):
 
 
 def stats_worker(user_id):
+    cancel_admin_waiting(user_id)
+
     users, requests, plus_users = (
         get_global_stats()
     )
@@ -1200,6 +1312,8 @@ def clear(message):
 
 
 def clear_worker(user_id):
+    cancel_admin_waiting(user_id)
+
     clear_history(user_id)
 
     bot.send_message(
@@ -1224,6 +1338,8 @@ def help_command(message):
 
 
 def help_worker(user_id):
+    cancel_admin_waiting(user_id)
+
     text = (
         "❓ Помощь\n\n"
         "/profile — профиль\n"
@@ -1273,6 +1389,8 @@ def admin(message):
 
 
 def admin_worker(user_id):
+    cancel_admin_waiting(user_id)
+
     discount = get_discount()
     price = get_plus_price()
 
@@ -1302,6 +1420,8 @@ def discount_command(message):
         )
 
         return
+
+    cancel_admin_waiting(user_id)
 
     with admin_discount_lock:
         admin_discount_waiting.add(
@@ -1333,6 +1453,8 @@ def broadcast(message):
         )
 
         return
+
+    cancel_admin_waiting(user_id)
 
     with admin_broadcast_lock:
         admin_broadcast_waiting.add(
@@ -1445,6 +1567,8 @@ def ai_chat(message):
             return
 
         if text == "🔄 Сбросить скидку":
+            cancel_admin_waiting(user_id)
+
             if set_setting(
                 "plus_discount",
                 0
@@ -1467,6 +1591,8 @@ def ai_chat(message):
             return
 
         if text == "⬅️ Выйти из админки":
+            cancel_admin_waiting(user_id)
+
             bot.send_message(
                 user_id,
                 "вышел из админ-панели.",
@@ -1800,4 +1926,9 @@ if __name__ == "__main__":
     print("Workers:", MAX_WORKERS)
     print("Admins:", list(ADMIN_IDS))
 
-    bot.infinity_polling()
+    # ИСПРАВЛЕНИЕ: у unixgram-py нет метода infinity_polling() — это
+    # метод из pyTelegramBotAPI. В unixgram-py long-poll запускается
+    # через polling(). С infinity_polling() бот падал бы с
+    # AttributeError сразу при старте и вообще не работал бы, несмотря
+    # на то что Flask-заглушка /health продолжала бы отвечать "OK".
+    bot.polling()
