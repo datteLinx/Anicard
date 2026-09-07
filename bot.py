@@ -819,10 +819,7 @@ def profile_worker(user_id):
     bot.send_message(
         user_id,
         text,
-        reply_markup=(
-            ADMIN_KEYBOARD
-            if is_admin(user_id)
-            else MAIN_KEYBOARD
+        reply_markup=MAIN_KEYBOARD
         )
     )
 
