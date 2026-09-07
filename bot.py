@@ -821,7 +821,6 @@ def profile_worker(user_id):
         text,
         reply_markup=MAIN_KEYBOARD
         )
-    )
 
 
 @bot.message_handler(
